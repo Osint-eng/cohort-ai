@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ArrowDown, ArrowRight, ArrowUpRight, Check, ClipboardCheck, Command, Menu, MessageCircle, Moon, Sparkles, Sun, Users, X } from "lucide-react"
 
 const features = [
@@ -14,16 +14,57 @@ const steps = ["Create a room", "Invite your teammates with a code", "Paste your
 export default function LandingPage() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [dark, setDark] = useState(false)
+  const mainRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
     const saved = localStorage.getItem("cohort-theme") === "dark"
     setDark(saved)
     document.documentElement.classList.toggle("dark", saved)
-    const observer = new IntersectionObserver((entries) => entries.forEach((entry) => {
-      if (entry.isIntersecting) { entry.target.classList.add("is-visible"); observer.unobserve(entry.target) }
-    }), { threshold: 0.12 })
-    document.querySelectorAll(".landing-reveal").forEach((item) => observer.observe(item))
-    return () => observer.disconnect()
+
+    const mainEl = mainRef.current
+    const items = Array.from(document.querySelectorAll<HTMLElement>(".landing-reveal"))
+    const revealAll = () => {
+      items.forEach((item) => item.classList.add("is-visible"))
+    }
+
+    if (typeof IntersectionObserver === "undefined") {
+      revealAll()
+      return
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("is-visible")
+            observer.unobserve(entry.target)
+          }
+        })
+      },
+      { threshold: 0.05 }
+    )
+
+    items.forEach((item) => {
+      const rect = item.getBoundingClientRect()
+      if (rect.top < window.innerHeight) {
+        item.classList.add("is-visible")
+      } else {
+        observer.observe(item)
+      }
+    })
+
+    mainEl?.classList.add("reveal-ready")
+
+    const fallbackTimer = window.setTimeout(() => {
+      revealAll()
+      observer.disconnect()
+    }, 1000)
+
+    return () => {
+      window.clearTimeout(fallbackTimer)
+      mainEl?.classList.remove("reveal-ready")
+      observer.disconnect()
+    }
   }, [])
 
   const toggleTheme = () => {
@@ -33,7 +74,7 @@ export default function LandingPage() {
     document.documentElement.classList.toggle("dark", next)
   }
 
-  return <main className="landing-page">
+  return <main ref={mainRef} className="landing-page">
     <header className="landing-nav">
       <a className="landing-brand" href="/" aria-label="Cohort home"><span className="brand-mark"><MessageCircle size={20} fill="currentColor" /></span><span>cohort</span></a>
       <button className="landing-menu-toggle" onClick={() => setMenuOpen(!menuOpen)} aria-label={menuOpen ? "Close navigation menu" : "Open navigation menu"} aria-expanded={menuOpen}>{menuOpen ? <X /> : <Menu />}</button>

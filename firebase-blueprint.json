@@ -1,0 +1,286 @@
+{
+  "entities": {
+    "Room": {
+      "title": "Room",
+      "description": "A shared project workspace room identified by an 8-character uppercase alphanumeric server-generated code.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 8,
+          "pattern": "^[A-Z0-9]{8}$",
+          "description": "Server-generated 8-character uppercase room code."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Display title of the project room."
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 600,
+          "description": "Short snapshot summary of the project."
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the room creator."
+        },
+        "nextTaskNumber": {
+          "type": "integer",
+          "description": "Next sequential task index."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp."
+        }
+      },
+      "required": ["code", "title", "summary", "ownerId", "nextTaskNumber", "createdAt", "updatedAt"]
+    },
+    "Member": {
+      "title": "Member",
+      "description": "A Google-authenticated member belonging to a project room, keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the member."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Member display name from Google sign-in."
+        },
+        "photoURL": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Optional profile photo URL from Google sign-in."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["owner", "member"],
+          "description": "Role within the room."
+        },
+        "online": {
+          "type": "boolean",
+          "description": "Whether the member is currently active in the room."
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the user joined."
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last presence update."
+        }
+      },
+      "required": ["uid", "displayName", "photoURL", "role", "online", "joinedAt", "lastSeenAt"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "A real-time chat message in a project room from a team member or @cohort assistant.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Message document ID."
+        },
+        "senderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the sender or 'cohort' for assistant messages."
+        },
+        "triggeredBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the authenticated user who initiated the message or command."
+        },
+        "senderName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Display name of the sender."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "assistant"],
+          "description": "Whether the message was sent by a user or @cohort."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000,
+          "description": "Message text content."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the message was created."
+        }
+      },
+      "required": ["id", "senderId", "triggeredBy", "senderName", "role", "text", "createdAt"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "A project board task belonging to a room.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 32,
+          "pattern": "^t[0-9]+$",
+          "description": "Task identifier such as t1, t2."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Short actionable task title."
+        },
+        "suggested_owner": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Suggested owner display handle, e.g. @Priya."
+        },
+        "owner_uid": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Optional UID of assigned member or empty string."
+        },
+        "due_date": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "Due date label, e.g. Nov 20 or 2026-11-20."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["todo", "in_progress", "blocked", "done"],
+          "description": "Kanban column status."
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the member who created or last updated the task."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": ["id", "title", "suggested_owner", "owner_uid", "due_date", "status", "updatedBy", "createdAt", "updatedAt"]
+    },
+    "LogEntry": {
+      "title": "LogEntry",
+      "description": "Contribution and activity log entry recording task changes in a room.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Log entry document ID."
+        },
+        "actorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the acting user or 'cohort'."
+        },
+        "triggeredBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the authenticated user responsible for the action."
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Display name of the actor."
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "Action verb such as completed, blocked, started, created, reassigned."
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "Target task ID or 'board'."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Optional context or reason note."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the activity."
+        }
+      },
+      "required": ["id", "actorId", "triggeredBy", "actor", "action", "task_id", "note", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/rooms/{roomCode}": {
+      "schema": { "$ref": "#/entities/Room" },
+      "description": "Project room metadata keyed by 8-character uppercase alphanumeric code."
+    },
+    "/rooms/{roomCode}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/Member" },
+      "description": "Authenticated room members keyed by Firebase Auth UID."
+    },
+    "/rooms/{roomCode}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/Message" },
+      "description": "Real-time team chat messages and @cohort assistant replies."
+    },
+    "/rooms/{roomCode}/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/Task" },
+      "description": "Kanban project board tasks for the room."
+    },
+    "/rooms/{roomCode}/logs/{logId}": {
+      "schema": { "$ref": "#/entities/LogEntry" },
+      "description": "Contribution log entries for task updates and board extractions."
+    }
+  }
+}

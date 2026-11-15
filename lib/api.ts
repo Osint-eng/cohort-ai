@@ -1,151 +1,491 @@
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  Timestamp,
+  updateDoc,
+  writeBatch,
+} from "firebase/firestore"
+import type { User } from "firebase/auth"
+import { db, handleFirestoreError, OperationType } from "./firebase"
+
 export type TaskStatus = "todo" | "in_progress" | "blocked" | "done"
-export type Task = { id: string; title: string; suggested_owner: string; due_date: string; status: TaskStatus }
-export type LogEntry = { actor: string; action: string; task_id: string; note?: string; ts: string }
-export type Message = { name: string; text: string; ts: string; role: "user" | "assistant" }
-export type Member = { id: string; name: string; online: boolean }
-export type Room = { code: string; title: string; summary: string; messages: Message[]; board: Task[]; log: LogEntry[]; members: Member[] }
-export type JoinedRoom = { room: Room; memberId: string }
-export class RoomNotFoundError extends Error {
-  constructor() { super("Room not found"); this.name = "RoomNotFoundError" }
+export type Task = {
+  id: string
+  title: string
+  suggested_owner: string
+  owner_uid: string
+  due_date: string
+  status: TaskStatus
 }
-export class NameTakenError extends Error {
-  constructor() { super("That name is already taken in this room"); this.name = "NameTakenError" }
+export type LogEntry = {
+  id: string
+  actorId: string
+  actor: string
+  action: string
+  task_id: string
+  note?: string
+  ts: string
+}
+export type Message = {
+  id: string
+  senderId: string
+  name: string
+  text: string
+  ts: string
+  role: "user" | "assistant"
+}
+export type Member = {
+  uid: string
+  name: string
+  photoURL: string
+  role: "owner" | "member"
+  online: boolean
+}
+export type RoomMeta = {
+  code: string
+  title: string
+  summary: string
+  ownerId: string
 }
 
-const now = Date.now()
-const mins = (n: number) => new Date(now - n * 60_000).toISOString()
-const rooms = new Map<string, Room>()
-const createSeedRoom = (code: string, title: string): Room => ({
-  code, title, summary: "A campus guide that helps new students find their people, places, and rhythm.",
-  members: [{ id: `${code}-member-sam`, name: "Sam", online: true }, { id: `${code}-member-priya`, name: "Priya", online: true }, { id: `${code}-member-alex`, name: "Alex", online: true }],
-  messages: [
-    { name: "Sam", text: "Hey team! I pulled together the first pass of our project plan.", ts: mins(38), role: "user" },
-    { name: "Priya", text: "Love it. I can take the student interview questions.", ts: mins(34), role: "user" },
-    { name: "cohort", text: "I’m keeping an eye on the plan. Tag me with @cohort help whenever you need a hand.", ts: mins(32), role: "assistant" },
-    { name: "Alex", text: "I’ll start sketching the onboarding flow this afternoon.", ts: mins(25), role: "user" },
-  ],
-  board: [
-    { id: "t1", title: "Interview 5 first-year students", suggested_owner: "@Priya", due_date: "Nov 18", status: "in_progress" },
-    { id: "t2", title: "Map the campus welcome journey", suggested_owner: "@Sam", due_date: "Nov 19", status: "todo" },
-    { id: "t3", title: "Sketch onboarding screens", suggested_owner: "@Alex", due_date: "Nov 20", status: "in_progress" },
-    { id: "t4", title: "Review accessibility requirements", suggested_owner: "@Sam", due_date: "Nov 21", status: "blocked" },
-    { id: "t5", title: "Share concept with advisor", suggested_owner: "@Priya", due_date: "Nov 24", status: "done" },
-  ],
-  log: [
-    { actor: "Priya", action: "started", task_id: "t1", note: "Drafting interview questions", ts: mins(12) },
-    { actor: "Alex", action: "updated", task_id: "t3", note: "First sketches are underway", ts: mins(46) },
-    { actor: "Sam", action: "blocked", task_id: "t4", note: "Waiting on the campus design guide", ts: mins(130) },
-    { actor: "Priya", action: "completed", task_id: "t5", note: "Advisor gave us a thumbs up", ts: mins(320) },
-  ],
-})
-const normalizeCode = (code: string) => code.trim().toUpperCase()
-const roomStorageKey = (code: string) => `cohort-mock-room:${normalizeCode(code)}`
-const persistRoom = (room: Room) => {
-  rooms.set(room.code, room)
-  if (typeof window !== "undefined") window.localStorage.setItem(roomStorageKey(room.code), JSON.stringify(room))
+export class RoomNotFoundError extends Error {
+  constructor() {
+    super("Room not found")
+    this.name = "RoomNotFoundError"
+  }
 }
-const getRoomOrThrow = (code: string) => {
-  const key = normalizeCode(code)
-  if (typeof window !== "undefined") {
-    const saved = window.localStorage.getItem(roomStorageKey(key))
-    if (saved) {
-      try {
-        const room = JSON.parse(saved) as Room
-        rooms.set(key, room)
-        return room
-      } catch { window.localStorage.removeItem(roomStorageKey(key)) }
+
+export const ROOM_CODE_REGEX = /^[A-Z0-9]{8}$/
+
+export function normalizeRoomCode(code: string): string {
+  return code.trim().toUpperCase()
+}
+
+export function getUserDisplayName(user: User): string {
+  const emailPrefix = user.email ? user.email.split("@")[0] : ""
+  return (user.displayName || emailPrefix || "Teammate").trim().slice(0, 80)
+}
+
+function makeClientId(prefix: string): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
+  }
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+}
+
+function timestampToIso(value: unknown): string {
+  if (value instanceof Timestamp) {
+    return value.toDate().toISOString()
+  }
+  if (value && typeof value === "object" && "toDate" in value && typeof (value as { toDate: () => Date }).toDate === "function") {
+    return (value as { toDate: () => Date }).toDate().toISOString()
+  }
+  if (typeof value === "string") {
+    return value
+  }
+  return new Date().toISOString()
+}
+
+export async function createRoomOnServer(user: User, title?: string): Promise<string> {
+  const idToken = await user.getIdToken()
+  const res = await fetch("/api/rooms", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ title: title?.trim() || "" }),
+  })
+  const data = (await res.json().catch(() => ({}))) as { code?: string; error?: string }
+  if (!res.ok || !data.code) {
+    throw new Error(data.error || "Could not create room")
+  }
+  return data.code
+}
+
+export async function ensureRoomMembership(rawCode: string, user: User): Promise<RoomMeta> {
+  const code = normalizeRoomCode(rawCode)
+  if (!ROOM_CODE_REGEX.test(code)) {
+    throw new RoomNotFoundError()
+  }
+
+  const roomPath = `rooms/${code}`
+  const roomRef = doc(db, "rooms", code)
+  let roomSnap
+  try {
+    roomSnap = await getDoc(roomRef)
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, roomPath)
+  }
+
+  if (!roomSnap.exists()) {
+    throw new RoomNotFoundError()
+  }
+
+  const roomData = roomSnap.data()
+  const memberPath = `rooms/${code}/members/${user.uid}`
+  const memberRef = doc(db, "rooms", code, "members", user.uid)
+  const displayName = getUserDisplayName(user)
+  const photoURL = (user.photoURL || "").slice(0, 500)
+
+  let memberSnap
+  try {
+    memberSnap = await getDoc(memberRef)
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, memberPath)
+  }
+
+  if (!memberSnap.exists()) {
+    const role = roomData.ownerId === user.uid ? "owner" : "member"
+    try {
+      await setDoc(memberRef, {
+        uid: user.uid,
+        displayName,
+        photoURL,
+        role,
+        online: true,
+        joinedAt: serverTimestamp(),
+        lastSeenAt: serverTimestamp(),
+      })
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, memberPath)
+    }
+  } else {
+    try {
+      await updateDoc(memberRef, {
+        displayName,
+        photoURL,
+        online: true,
+        lastSeenAt: serverTimestamp(),
+      })
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, memberPath)
     }
   }
-  const room = rooms.get(key)
-  if (!room) throw new RoomNotFoundError()
-  return room
-}
-const generateRoomCode = () => {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-  const bytes = new Uint8Array(8)
-  if (typeof crypto !== "undefined" && "getRandomValues" in crypto) crypto.getRandomValues(bytes)
-  else for (let index = 0; index < bytes.length; index++) bytes[index] = Math.floor(Math.random() * 256)
-  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("")
-}
-const createId = () => typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `member-${Date.now()}-${Math.random().toString(36).slice(2)}`
-export async function createRoom(input: { name: string; title?: string }): Promise<JoinedRoom> {
-  await Promise.resolve()
-  let code = generateRoomCode()
-  while (rooms.has(code) || (typeof window !== "undefined" && window.localStorage.getItem(roomStorageKey(code)))) code = generateRoomCode()
-  const room = createSeedRoom(code, input.title?.trim() || "Your project room")
-  room.members = []
-  const memberId = createId()
-  room.members.push({ id: memberId, name: input.name.trim(), online: true })
-  persistRoom(room)
-  return { room: structuredClone(room), memberId }
-}
-export async function joinRoom(input: { code: string; name: string; memberId?: string }): Promise<JoinedRoom> {
-  await Promise.resolve()
-  const room = getRoomOrThrow(input.code)
-  const name = input.name.trim()
-  const existingMember = input.memberId ? room.members.find((member) => member.id === input.memberId) : undefined
-  if (room.members.some((member) => member.id !== existingMember?.id && member.name.toLowerCase() === name.toLowerCase())) throw new NameTakenError()
-  if (existingMember) {
-    existingMember.name = name
-    existingMember.online = true
-    persistRoom(room)
-    return { room: structuredClone(room), memberId: existingMember.id }
+
+  return {
+    code,
+    title: String(roomData.title || "Project room"),
+    summary: String(roomData.summary || ""),
+    ownerId: String(roomData.ownerId || ""),
   }
-  const memberId = createId()
-  room.members.push({ id: memberId, name, online: true })
-  persistRoom(room)
-  return { room: structuredClone(room), memberId }
 }
-export async function getRoom(code: string): Promise<Room> { await Promise.resolve(); return structuredClone(getRoomOrThrow(code)) }
-export async function leaveRoom(code: string, memberId: string): Promise<void> {
-  const room = getRoomOrThrow(code)
-  room.members = room.members.filter((member) => member.id !== memberId)
-  persistRoom(room)
+
+export async function setMemberPresence(code: string, user: User, online: boolean): Promise<void> {
+  const normalized = normalizeRoomCode(code)
+  const memberPath = `rooms/${normalized}/members/${user.uid}`
+  const memberRef = doc(db, "rooms", normalized, "members", user.uid)
+  try {
+    await updateDoc(memberRef, {
+      displayName: getUserDisplayName(user),
+      photoURL: (user.photoURL || "").slice(0, 500),
+      online,
+      lastSeenAt: serverTimestamp(),
+    })
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, memberPath)
+  }
 }
-export async function updateTaskStatus(code: string, taskId: string, status: TaskStatus, actor: string): Promise<Room> {
-  const room = getRoomOrThrow(code)
-  const task = room.board.find((item) => item.id === taskId)
-  if (!task) throw new Error(`Task ${taskId} was not found`)
-  task.status = status
-  const action = status === "done" ? "completed" : status === "blocked" ? "blocked" : status === "in_progress" ? "started" : "moved to to do"
-  room.log.unshift({ actor, action, task_id: taskId, note: task.title, ts: new Date().toISOString() })
-  persistRoom(room)
-  return structuredClone(room)
+
+export async function leaveRoomMembership(code: string, user: User): Promise<void> {
+  const normalized = normalizeRoomCode(code)
+  const memberPath = `rooms/${normalized}/members/${user.uid}`
+  try {
+    await deleteDoc(doc(db, "rooms", normalized, "members", user.uid))
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, memberPath)
+  }
 }
-export async function reassignTask(code: string, taskId: string, owner: string, actor: string): Promise<Room> {
-  const room = getRoomOrThrow(code)
-  const task = room.board.find((item) => item.id === taskId)
-  if (!task) throw new Error(`Task ${taskId} was not found`)
-  task.suggested_owner = owner.startsWith("@") ? owner : `@${owner}`
-  room.log.unshift({ actor, action: "reassigned", task_id: taskId, note: `Assigned to ${task.suggested_owner}`, ts: new Date().toISOString() })
-  persistRoom(room)
-  return structuredClone(room)
+
+export function subscribeToRoom(
+  rawCode: string,
+  callbacks: {
+    onRoom: (meta: RoomMeta) => void
+    onMembers: (members: Member[]) => void
+    onMessages: (messages: Message[]) => void
+    onTasks: (tasks: Task[]) => void
+    onLogs: (logs: LogEntry[]) => void
+    onNotFound: () => void
+    onError: (err: Error) => void
+  }
+): () => void {
+  const code = normalizeRoomCode(rawCode)
+
+  const unsubRoom = onSnapshot(
+    doc(db, "rooms", code),
+    (snap) => {
+      if (!snap.exists()) {
+        callbacks.onNotFound()
+        return
+      }
+      const d = snap.data()
+      callbacks.onRoom({
+        code,
+        title: String(d.title || "Project room"),
+        summary: String(d.summary || ""),
+        ownerId: String(d.ownerId || ""),
+      })
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.GET, `rooms/${code}`)
+      } catch (wrapped) {
+        callbacks.onError(wrapped as Error)
+      }
+    }
+  )
+
+  const unsubMembers = onSnapshot(
+    collection(db, "rooms", code, "members"),
+    (snap) => {
+      const list: Member[] = snap.docs.map((d) => {
+        const data = d.data()
+        return {
+          uid: String(data.uid || d.id),
+          name: String(data.displayName || "Teammate"),
+          photoURL: String(data.photoURL || ""),
+          role: data.role === "owner" ? "owner" : "member",
+          online: Boolean(data.online),
+        }
+      })
+      list.sort((a, b) => (a.role === b.role ? a.name.localeCompare(b.name) : a.role === "owner" ? -1 : 1))
+      callbacks.onMembers(list)
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, `rooms/${code}/members`)
+      } catch (wrapped) {
+        callbacks.onError(wrapped as Error)
+      }
+    }
+  )
+
+  const unsubMessages = onSnapshot(
+    query(collection(db, "rooms", code, "messages"), orderBy("createdAt", "asc")),
+    (snap) => {
+      const list: Message[] = snap.docs.map((d) => {
+        const data = d.data()
+        return {
+          id: String(data.id || d.id),
+          senderId: String(data.senderId || ""),
+          name: String(data.senderName || "Teammate"),
+          text: String(data.text || ""),
+          ts: timestampToIso(data.createdAt),
+          role: data.role === "assistant" ? "assistant" : "user",
+        }
+      })
+      callbacks.onMessages(list)
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, `rooms/${code}/messages`)
+      } catch (wrapped) {
+        callbacks.onError(wrapped as Error)
+      }
+    }
+  )
+
+  const unsubTasks = onSnapshot(
+    collection(db, "rooms", code, "tasks"),
+    (snap) => {
+      const list: Task[] = snap.docs.map((d) => {
+        const data = d.data()
+        return {
+          id: String(data.id || d.id),
+          title: String(data.title || ""),
+          suggested_owner: String(data.suggested_owner || "@Team"),
+          owner_uid: String(data.owner_uid || ""),
+          due_date: String(data.due_date || "TBD"),
+          status: (data.status as TaskStatus) || "todo",
+        }
+      })
+      list.sort((a, b) => {
+        const na = Number(a.id.replace(/^t/i, "")) || 0
+        const nb = Number(b.id.replace(/^t/i, "")) || 0
+        return na - nb
+      })
+      callbacks.onTasks(list)
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, `rooms/${code}/tasks`)
+      } catch (wrapped) {
+        callbacks.onError(wrapped as Error)
+      }
+    }
+  )
+
+  const unsubLogs = onSnapshot(
+    query(collection(db, "rooms", code, "logs"), orderBy("createdAt", "desc")),
+    (snap) => {
+      const list: LogEntry[] = snap.docs.map((d) => {
+        const data = d.data()
+        return {
+          id: String(data.id || d.id),
+          actorId: String(data.actorId || ""),
+          actor: String(data.actor || "Teammate"),
+          action: String(data.action || "updated"),
+          task_id: String(data.task_id || ""),
+          note: typeof data.note === "string" && data.note ? data.note : undefined,
+          ts: timestampToIso(data.createdAt),
+        }
+      })
+      callbacks.onLogs(list)
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, `rooms/${code}/logs`)
+      } catch (wrapped) {
+        callbacks.onError(wrapped as Error)
+      }
+    }
+  )
+
+  return () => {
+    unsubRoom()
+    unsubMembers()
+    unsubMessages()
+    unsubTasks()
+    unsubLogs()
+  }
 }
-export async function postMessage(code: string, name: string, text: string): Promise<Room> {
-  const room = getRoomOrThrow(code)
-  room.messages.push({ name, text, ts: new Date().toISOString(), role: "user" })
-  const command = text.toLowerCase()
-  if (command.includes("@cohort help")) room.messages.push({ name: "cohort", text: "Try @cohort sample to seed a board, @cohort extract to open the brief extractor, or @cohort check-in to share a quick team pulse.", ts: new Date().toISOString(), role: "assistant" })
-  else if (command.includes("@cohort sample")) room.messages.push({ name: "cohort", text: "Your sample project board is ready to go. Take a look in the Board tab!", ts: new Date().toISOString(), role: "assistant" })
-  else if (command.includes("@cohort check-in")) room.messages.push({ name: "cohort", text: "Quick check-in: what’s one thing you’ve finished, and what’s one thing you need help with?", ts: new Date().toISOString(), role: "assistant" })
-  else if (command.includes("@cohort list")) room.messages.push({ name: "cohort", text: `There are ${room.board.length} tasks on your board: ${room.board.map((task) => task.id).join(", ")}.`, ts: new Date().toISOString(), role: "assistant" })
-  else if (command.includes("@cohort extract")) room.messages.push({ name: "cohort", text: "Open Extract board above to turn a project brief into a shared plan.", ts: new Date().toISOString(), role: "assistant" })
-  persistRoom(room)
-  return structuredClone(room)
+
+export async function sendChatMessage(
+  rawCode: string,
+  user: User,
+  text: string
+): Promise<{ cohortPending: boolean }> {
+  const code = normalizeRoomCode(rawCode)
+  const cleanText = text.trim().slice(0, 8000)
+  if (!cleanText) return { cohortPending: false }
+
+  const msgId = makeClientId("msg")
+  const msgPath = `rooms/${code}/messages/${msgId}`
+  try {
+    await setDoc(doc(db, "rooms", code, "messages", msgId), {
+      id: msgId,
+      senderId: user.uid,
+      triggeredBy: user.uid,
+      senderName: getUserDisplayName(user),
+      role: "user",
+      text: cleanText,
+      createdAt: serverTimestamp(),
+    })
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, msgPath)
+  }
+
+  return { cohortPending: /@cohort\b/i.test(cleanText) }
 }
-export async function extractBoard(code: string, brief: string): Promise<Room> {
-  const room = getRoomOrThrow(code)
-  const title = brief.trim().split(/[.!?\n]/)[0]?.slice(0, 72)
-  room.summary = title || room.summary
-  room.board = [
-    { id: "t1", title: "Define the project goals", suggested_owner: "@Sam", due_date: "Nov 18", status: "todo" },
-    { id: "t2", title: "Research the audience and context", suggested_owner: "@Priya", due_date: "Nov 20", status: "todo" },
-    { id: "t3", title: "Create the first project draft", suggested_owner: "@Alex", due_date: "Nov 24", status: "todo" },
-    { id: "t4", title: "Gather feedback from the team", suggested_owner: "@Sam", due_date: "Nov 26", status: "todo" },
-    { id: "t5", title: "Present the final project", suggested_owner: "@Priya", due_date: "Dec 02", status: "todo" },
-  ]
-  room.messages.push({ name: "cohort", text: "I turned your brief into a first-draft board. Your team can update owners and statuses as you go.", ts: new Date().toISOString(), role: "assistant" })
-  room.log.unshift({ actor: "cohort", action: "created", task_id: "board", note: "Extracted a project plan from your brief", ts: new Date().toISOString() })
-  persistRoom(room)
-  return structuredClone(room)
+
+export async function runCohortCommand(
+  rawCode: string,
+  user: User,
+  payload: { messageText?: string; brief?: string; action?: "extract" }
+): Promise<void> {
+  const code = normalizeRoomCode(rawCode)
+  const idToken = await user.getIdToken()
+  const res = await fetch("/api/cohort", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      roomCode: code,
+      ...payload,
+    }),
+  })
+  const data = (await res.json().catch(() => ({}))) as { error?: string }
+  if (!res.ok) {
+    throw new Error(data.error || "Cohort command failed")
+  }
+}
+
+export async function updateTaskStatusFirestore(
+  rawCode: string,
+  task: Task,
+  status: TaskStatus,
+  user: User
+): Promise<void> {
+  const code = normalizeRoomCode(rawCode)
+  const batch = writeBatch(db)
+  const taskRef = doc(db, "rooms", code, "tasks", task.id)
+  const logId = makeClientId("log")
+  const logRef = doc(db, "rooms", code, "logs", logId)
+
+  const action =
+    status === "done"
+      ? "completed"
+      : status === "blocked"
+        ? "blocked"
+        : status === "in_progress"
+          ? "started"
+          : "moved to to do"
+
+  batch.update(taskRef, {
+    status,
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp(),
+  })
+  batch.set(logRef, {
+    id: logId,
+    actorId: user.uid,
+    triggeredBy: user.uid,
+    actor: getUserDisplayName(user),
+    action,
+    task_id: task.id,
+    note: task.title.slice(0, 500),
+    createdAt: serverTimestamp(),
+  })
+
+  try {
+    await batch.commit()
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `rooms/${code}/tasks/${task.id}`)
+  }
+}
+
+export async function reassignTaskFirestore(
+  rawCode: string,
+  task: Task,
+  member: Member,
+  user: User
+): Promise<void> {
+  const code = normalizeRoomCode(rawCode)
+  const handle = `@${member.name.split(" ")[0]}`.slice(0, 80)
+  const batch = writeBatch(db)
+  const taskRef = doc(db, "rooms", code, "tasks", task.id)
+  const logId = makeClientId("log")
+  const logRef = doc(db, "rooms", code, "logs", logId)
+
+  batch.update(taskRef, {
+    suggested_owner: handle,
+    owner_uid: member.uid,
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp(),
+  })
+  batch.set(logRef, {
+    id: logId,
+    actorId: user.uid,
+    triggeredBy: user.uid,
+    actor: getUserDisplayName(user),
+    action: "reassigned",
+    task_id: task.id,
+    note: `Assigned to ${handle}`.slice(0, 500),
+    createdAt: serverTimestamp(),
+  })
+
+  try {
+    await batch.commit()
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `rooms/${code}/tasks/${task.id}`)
+  }
 }
