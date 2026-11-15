@@ -1,5 +1,5 @@
-import CohortApp from "./cohort-app"
+import LandingPage from "./landing-page"
 
 export default function Page() {
-  return <CohortApp />
+  return <LandingPage />
 }

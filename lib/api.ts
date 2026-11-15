@@ -2,15 +2,22 @@ export type TaskStatus = "todo" | "in_progress" | "blocked" | "done"
 export type Task = { id: string; title: string; suggested_owner: string; due_date: string; status: TaskStatus }
 export type LogEntry = { actor: string; action: string; task_id: string; note?: string; ts: string }
 export type Message = { name: string; text: string; ts: string; role: "user" | "assistant" }
-export type Member = { name: string; online: boolean }
+export type Member = { id: string; name: string; online: boolean }
 export type Room = { code: string; title: string; summary: string; messages: Message[]; board: Task[]; log: LogEntry[]; members: Member[] }
+export type JoinedRoom = { room: Room; memberId: string }
+export class RoomNotFoundError extends Error {
+  constructor() { super("Room not found"); this.name = "RoomNotFoundError" }
+}
+export class NameTakenError extends Error {
+  constructor() { super("That name is already taken in this room"); this.name = "NameTakenError" }
+}
 
 const now = Date.now()
 const mins = (n: number) => new Date(now - n * 60_000).toISOString()
 const rooms = new Map<string, Room>()
 const createSeedRoom = (code: string, title: string): Room => ({
   code, title, summary: "A campus guide that helps new students find their people, places, and rhythm.",
-  members: [{ name: "Sam", online: true }, { name: "Priya", online: true }, { name: "Alex", online: true }],
+  members: [{ id: `${code}-member-sam`, name: "Sam", online: true }, { id: `${code}-member-priya`, name: "Priya", online: true }, { id: `${code}-member-alex`, name: "Alex", online: true }],
   messages: [
     { name: "Sam", text: "Hey team! I pulled together the first pass of our project plan.", ts: mins(38), role: "user" },
     { name: "Priya", text: "Love it. I can take the student interview questions.", ts: mins(34), role: "user" },
@@ -31,22 +38,91 @@ const createSeedRoom = (code: string, title: string): Room => ({
     { actor: "Priya", action: "completed", task_id: "t5", note: "Advisor gave us a thumbs up", ts: mins(320) },
   ],
 })
-const getOrCreate = (code: string) => {
-  const key = code.trim().toUpperCase()
-  if (!rooms.has(key)) rooms.set(key, createSeedRoom(key, "Campus Connect"))
-  return rooms.get(key)!
+const normalizeCode = (code: string) => code.trim().toUpperCase()
+const roomStorageKey = (code: string) => `cohort-mock-room:${normalizeCode(code)}`
+const persistRoom = (room: Room) => {
+  rooms.set(room.code, room)
+  if (typeof window !== "undefined") window.localStorage.setItem(roomStorageKey(room.code), JSON.stringify(room))
 }
-export async function joinRoom(input: { code?: string; name: string; title?: string }): Promise<Room> {
+const getRoomOrThrow = (code: string) => {
+  const key = normalizeCode(code)
+  if (typeof window !== "undefined") {
+    const saved = window.localStorage.getItem(roomStorageKey(key))
+    if (saved) {
+      try {
+        const room = JSON.parse(saved) as Room
+        rooms.set(key, room)
+        return room
+      } catch { window.localStorage.removeItem(roomStorageKey(key)) }
+    }
+  }
+  const room = rooms.get(key)
+  if (!room) throw new RoomNotFoundError()
+  return room
+}
+const generateRoomCode = () => {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+  const bytes = new Uint8Array(8)
+  if (typeof crypto !== "undefined" && "getRandomValues" in crypto) crypto.getRandomValues(bytes)
+  else for (let index = 0; index < bytes.length; index++) bytes[index] = Math.floor(Math.random() * 256)
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("")
+}
+const createId = () => typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `member-${Date.now()}-${Math.random().toString(36).slice(2)}`
+export async function createRoom(input: { name: string; title?: string }): Promise<JoinedRoom> {
   await Promise.resolve()
-  const code = input.code?.trim().toUpperCase() || Math.random().toString(36).slice(2, 8).toUpperCase()
-  const room = getOrCreate(code)
-  if (input.title?.trim()) room.title = input.title.trim()
-  if (!room.members.some((member) => member.name.toLowerCase() === input.name.trim().toLowerCase())) room.members.push({ name: input.name.trim(), online: true })
+  let code = generateRoomCode()
+  while (rooms.has(code) || (typeof window !== "undefined" && window.localStorage.getItem(roomStorageKey(code)))) code = generateRoomCode()
+  const room = createSeedRoom(code, input.title?.trim() || "Your project room")
+  room.members = []
+  const memberId = createId()
+  room.members.push({ id: memberId, name: input.name.trim(), online: true })
+  persistRoom(room)
+  return { room: structuredClone(room), memberId }
+}
+export async function joinRoom(input: { code: string; name: string; memberId?: string }): Promise<JoinedRoom> {
+  await Promise.resolve()
+  const room = getRoomOrThrow(input.code)
+  const name = input.name.trim()
+  const existingMember = input.memberId ? room.members.find((member) => member.id === input.memberId) : undefined
+  if (room.members.some((member) => member.id !== existingMember?.id && member.name.toLowerCase() === name.toLowerCase())) throw new NameTakenError()
+  if (existingMember) {
+    existingMember.name = name
+    existingMember.online = true
+    persistRoom(room)
+    return { room: structuredClone(room), memberId: existingMember.id }
+  }
+  const memberId = createId()
+  room.members.push({ id: memberId, name, online: true })
+  persistRoom(room)
+  return { room: structuredClone(room), memberId }
+}
+export async function getRoom(code: string): Promise<Room> { await Promise.resolve(); return structuredClone(getRoomOrThrow(code)) }
+export async function leaveRoom(code: string, memberId: string): Promise<void> {
+  const room = getRoomOrThrow(code)
+  room.members = room.members.filter((member) => member.id !== memberId)
+  persistRoom(room)
+}
+export async function updateTaskStatus(code: string, taskId: string, status: TaskStatus, actor: string): Promise<Room> {
+  const room = getRoomOrThrow(code)
+  const task = room.board.find((item) => item.id === taskId)
+  if (!task) throw new Error(`Task ${taskId} was not found`)
+  task.status = status
+  const action = status === "done" ? "completed" : status === "blocked" ? "blocked" : status === "in_progress" ? "started" : "moved to to do"
+  room.log.unshift({ actor, action, task_id: taskId, note: task.title, ts: new Date().toISOString() })
+  persistRoom(room)
   return structuredClone(room)
 }
-export async function getRoom(code: string): Promise<Room> { await Promise.resolve(); return structuredClone(getOrCreate(code)) }
+export async function reassignTask(code: string, taskId: string, owner: string, actor: string): Promise<Room> {
+  const room = getRoomOrThrow(code)
+  const task = room.board.find((item) => item.id === taskId)
+  if (!task) throw new Error(`Task ${taskId} was not found`)
+  task.suggested_owner = owner.startsWith("@") ? owner : `@${owner}`
+  room.log.unshift({ actor, action: "reassigned", task_id: taskId, note: `Assigned to ${task.suggested_owner}`, ts: new Date().toISOString() })
+  persistRoom(room)
+  return structuredClone(room)
+}
 export async function postMessage(code: string, name: string, text: string): Promise<Room> {
-  const room = getOrCreate(code)
+  const room = getRoomOrThrow(code)
   room.messages.push({ name, text, ts: new Date().toISOString(), role: "user" })
   const command = text.toLowerCase()
   if (command.includes("@cohort help")) room.messages.push({ name: "cohort", text: "Try @cohort sample to seed a board, @cohort extract to open the brief extractor, or @cohort check-in to share a quick team pulse.", ts: new Date().toISOString(), role: "assistant" })
@@ -54,10 +130,11 @@ export async function postMessage(code: string, name: string, text: string): Pro
   else if (command.includes("@cohort check-in")) room.messages.push({ name: "cohort", text: "Quick check-in: what’s one thing you’ve finished, and what’s one thing you need help with?", ts: new Date().toISOString(), role: "assistant" })
   else if (command.includes("@cohort list")) room.messages.push({ name: "cohort", text: `There are ${room.board.length} tasks on your board: ${room.board.map((task) => task.id).join(", ")}.`, ts: new Date().toISOString(), role: "assistant" })
   else if (command.includes("@cohort extract")) room.messages.push({ name: "cohort", text: "Open Extract board above to turn a project brief into a shared plan.", ts: new Date().toISOString(), role: "assistant" })
+  persistRoom(room)
   return structuredClone(room)
 }
 export async function extractBoard(code: string, brief: string): Promise<Room> {
-  const room = getOrCreate(code)
+  const room = getRoomOrThrow(code)
   const title = brief.trim().split(/[.!?\n]/)[0]?.slice(0, 72)
   room.summary = title || room.summary
   room.board = [
@@ -69,5 +146,6 @@ export async function extractBoard(code: string, brief: string): Promise<Room> {
   ]
   room.messages.push({ name: "cohort", text: "I turned your brief into a first-draft board. Your team can update owners and statuses as you go.", ts: new Date().toISOString(), role: "assistant" })
   room.log.unshift({ actor: "cohort", action: "created", task_id: "board", note: "Extracted a project plan from your brief", ts: new Date().toISOString() })
+  persistRoom(room)
   return structuredClone(room)
 }
