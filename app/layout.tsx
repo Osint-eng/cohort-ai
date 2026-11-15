@@ -1,6 +1,7 @@
-import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import './globals.css'
+
+const Analytics = () => null
 
 export const metadata: Metadata = {
   title: 'Cohort — Group projects, finally under control',
