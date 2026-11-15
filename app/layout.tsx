@@ -3,8 +3,13 @@ import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Cohort — Better together',
-  description: 'Your team’s project manager that lives in the chat. Plan, share, and keep your student project moving together.',
+  title: 'Cohort — Group projects, finally under control',
+  description: 'Turn your student project brief into shared tasks, owners and deadlines. Plan, chat and finish your group project together with Cohort.',
+  openGraph: {
+    title: 'Cohort — Group projects, finally under control',
+    description: 'A teammate in your group chat that turns your brief into tasks, owners and deadlines.',
+    type: 'website',
+  },
   generator: 'v0.app',
   icons: {
     icon: [

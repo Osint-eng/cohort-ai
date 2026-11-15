@@ -1,8 +1,9 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
-import { joinRoom, getRoom, postMessage, extractBoard, updateTaskStatus, reassignTask, type Room, type Task, type TaskStatus, type Member } from "@/lib/api"
-import { ArrowDown, ArrowRight, ArrowUpRight, Bot, Check, ChevronDown, CircleHelp, Clipboard, Command, FileText, Hash, LayoutGrid, List, LoaderCircle, MessageCircle, Moon, MoreHorizontal, Plus, Send, Sparkles, Sun, Users, X } from "lucide-react"
+import { useEffect, useState } from "react"
+import { useRouter } from "next/navigation"
+import { createRoom, joinRoom, getRoom, leaveRoom, postMessage, extractBoard, updateTaskStatus, reassignTask, RoomNotFoundError, NameTakenError, type Room, type Task, type TaskStatus, type Member } from "@/lib/api"
+import { ArrowDown, ArrowRight, ArrowUpRight, Bot, Check, ChevronDown, CircleHelp, Clipboard, Command, FileText, Hash, LayoutGrid, List, LoaderCircle, LogOut, MessageCircle, Moon, MoreHorizontal, Plus, Send, Share2, Sparkles, Sun, Users, X } from "lucide-react"
 
 const commands = ["@cohort help", "@cohort sample", "@cohort extract", "@cohort check-in", "@cohort list"]
 const statusColumns: { id: TaskStatus; label: string; dot: string }[] = [
@@ -21,11 +22,21 @@ const relativeTime = (ts: string) => {
   return `${Math.floor(mins / 1440)}d ago`
 }
 
-export default function CohortApp() {
+const memberStorageKey = (code: string) => `cohort-member:${code.toUpperCase()}`
+const themeStorageKey = "cohort-theme"
+
+export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; code?: string }) {
+  const router = useRouter()
   const [room, setRoom] = useState<Room | null>(null)
   const [name, setName] = useState("")
   const [roomCode, setRoomCode] = useState("")
   const [projectTitle, setProjectTitle] = useState("")
+  const [memberId, setMemberId] = useState("")
+  const [isJoined, setIsJoined] = useState(false)
+  const [roomLoading, setRoomLoading] = useState(mode === "room")
+  const [roomNotFound, setRoomNotFound] = useState(false)
+  const [reconnecting, setReconnecting] = useState(false)
+  const [roomMenuOpen, setRoomMenuOpen] = useState(false)
   const [message, setMessage] = useState("")
   const [activeTab, setActiveTab] = useState("Chat")
   const [view, setView] = useState<"board" | "table">("board")
@@ -38,21 +49,61 @@ export default function CohortApp() {
   const [error, setError] = useState("")
   const [taskMenuId, setTaskMenuId] = useState<string | null>(null)
 
-  useEffect(() => { document.documentElement.classList.toggle("dark", dark) }, [dark])
   useEffect(() => {
-    if (!room) return
-    const interval = window.setInterval(async () => { try { setRoom(await getRoom(room.code)) } catch { setError("Couldn’t refresh the room. Check your connection and try again.") } }, 3000)
+    const savedTheme = localStorage.getItem(themeStorageKey) === "dark"
+    setDark(savedTheme)
+    document.documentElement.classList.toggle("dark", savedTheme)
+  }, [])
+  useEffect(() => {
+    if (mode !== "room") return
+    let active = true
+    getRoom(code).then((loadedRoom) => {
+      if (!active) return
+      setRoom(loadedRoom)
+      const savedMemberId = localStorage.getItem(memberStorageKey(code)) || ""
+      const member = loadedRoom.members.find((item) => item.id === savedMemberId)
+      if (member) { setMemberId(savedMemberId); setName(member.name); setIsJoined(true) }
+      setRoomLoading(false)
+    }).catch((cause) => {
+      if (!active) return
+      if (cause instanceof RoomNotFoundError) setRoomNotFound(true)
+      else setError("We couldn’t open that room. Please try again.")
+      setRoomLoading(false)
+    })
+    return () => { active = false }
+  }, [mode, code])
+  useEffect(() => {
+    if (!room || !isJoined) return
+    const interval = window.setInterval(async () => {
+      try { setRoom(await getRoom(room.code)); setReconnecting(false) }
+      catch { setReconnecting(true) }
+    }, 3000)
     return () => window.clearInterval(interval)
-  }, [room?.code])
+  }, [room?.code, isJoined])
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(""), 2600); return () => window.clearTimeout(timer) }, [toast])
 
   const enterRoom = async (event: React.FormEvent) => {
     event.preventDefault()
     if (!name.trim()) return
     setJoining(true); setError("")
-    try { setRoom(await joinRoom({ code: roomCode, name: name.trim(), title: projectTitle })); setToast(roomCode ? "Welcome back to your room" : "Your room is ready") }
-    catch { setError("We couldn’t open that room. Please try again.") }
-    finally { setJoining(false) }
+    try {
+      const result = mode === "room"
+        ? await joinRoom({ code, name: name.trim(), memberId: memberId || undefined })
+        : roomCode.trim()
+          ? await joinRoom({ code: roomCode.trim(), name: name.trim() })
+          : await createRoom({ name: name.trim(), title: projectTitle })
+      setRoom(result.room)
+      setMemberId(result.memberId)
+      setName(name.trim())
+      setIsJoined(true)
+      localStorage.setItem(memberStorageKey(result.room.code), result.memberId)
+      setToast(roomCode.trim() ? "Welcome to your room" : "Your room is ready")
+      if (mode === "join") router.push(`/room/${result.room.code}`)
+    } catch (cause) {
+      if (cause instanceof NameTakenError) setError("That name is already in this room. Try a different display name.")
+      else if (cause instanceof RoomNotFoundError) setError("Room not found. Check the code and try again, or create a new room.")
+      else setError("We couldn’t open that room. Please try again.")
+    } finally { setJoining(false) }
   }
   const send = async (event?: React.FormEvent) => {
     event?.preventDefault()
@@ -86,24 +137,42 @@ export default function CohortApp() {
     if (!room) return
     await navigator.clipboard?.writeText(room.code); setCopied(true); setToast("Room code copied"); window.setTimeout(() => setCopied(false), 1800)
   }
+  const copyInviteLink = async () => {
+    if (!room) return
+    await navigator.clipboard?.writeText(new URL(`/room/${room.code}`, window.location.origin).toString())
+    setToast("Invite link copied")
+  }
+  const toggleTheme = () => {
+    const next = !dark
+    setDark(next)
+    localStorage.setItem(themeStorageKey, next ? "dark" : "light")
+  }
+  const handleLeaveRoom = async () => {
+    if (room && memberId) await leaveRoom(room.code, memberId)
+    localStorage.removeItem(memberStorageKey(code || room?.code || ""))
+    router.push("/join")
+  }
   const fillCommand = (command: string) => { if (command === "@cohort extract") setExtractOpen(true); else { setMessage(command); document.getElementById("chat-input")?.focus() } }
-  const roomReady = Boolean(room)
+  const roomReady = Boolean(room && isJoined)
   const activeRoom = room as Room
+
+  if (roomNotFound) return <main className="room-state-screen"><section className="room-state-card"><div className="room-state-icon"><Hash size={24} /></div><p className="eyebrow">PROJECT ROOM</p><h1>Room not found</h1><p>That invite link may be old or the room code may be incorrect.</p><a className="primary-button" href="/join">Create a new room <ArrowRight size={16} /></a></section></main>
+  if (roomLoading) return <main className="room-state-screen"><div className="room-loading" role="status"><LoaderCircle className="spin" size={20} /> Opening room…</div></main>
 
   return !roomReady ? <main className="join-screen">
     <div className="join-orbit orbit-one" /><div className="join-orbit orbit-two" />
-    <header className="join-brand"><div className="brand-mark"><MessageCircle size={21} fill="currentColor" /></div><span>cohort</span></header>
+    <header className="join-brand"><a href="/" className="join-brand-link"><span className="brand-mark"><MessageCircle size={21} fill="currentColor" /></span><span>cohort</span></a><button className="join-theme-toggle" onClick={toggleTheme} aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button></header>
     <section className="join-card">
       <div className="join-illustration"><div className="illus-circle"><Users size={27} /><span className="illus-spark">✦</span></div></div>
       <p className="eyebrow"><span className="live-dot" /> BUILT FOR THE GROUP PROJECT</p>
-      <h1>Big ideas,<br /><span>better together.</span></h1>
-      <p className="join-description">Your team&apos;s project manager that lives in the chat.</p>
+      <h1>{mode === "room" ? <>Join the<br /><span>conversation.</span></> : <>Big ideas,<br /><span>better together.</span></>}</h1>
+      <p className="join-description">{mode === "room" ? `Enter your display name to join ${room?.title ?? "this room"}.` : "Your team’s project manager that lives in the chat."}</p>
       <form onSubmit={enterRoom} className="join-form">
-        <label>Room code <span className="optional">OPTIONAL</span><div className="input-wrap"><Hash size={16} /><input value={roomCode} onChange={(event) => setRoomCode(event.target.value)} placeholder="Leave empty to create a room" /></div></label>
+        {mode === "join" && <label>Room code <span className="optional">TO JOIN AN EXISTING ROOM</span><div className="input-wrap"><Hash size={16} /><input value={roomCode} onChange={(event) => setRoomCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))} placeholder="Enter an 8-character room code" maxLength={8} autoCapitalize="characters" /></div></label>}
         <label>Your name<div className="input-wrap"><span className="input-avatar">{name ? initials(name) : "?"}</span><input required value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Priya" /></div></label>
-        <label>Project title <span className="optional">OPTIONAL</span><div className="input-wrap"><FileText size={16} /><input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="e.g. Campus Connect" /></div></label>
+        {mode === "join" && !roomCode.trim() && <label>Project title <span className="optional">OPTIONAL</span><div className="input-wrap"><FileText size={16} /><input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="e.g. Campus Connect" /></div></label>}
         {error && <p className="form-error" role="alert">{error}</p>}
-        <button className="primary-button join-button" type="submit" disabled={joining}>{joining ? <LoaderCircle className="spin" size={17} /> : <>Create / Join room <ArrowRight size={17} /></>}</button>
+        <button className="primary-button join-button" type="submit" disabled={joining}>{joining ? <LoaderCircle className="spin" size={17} /> : <>{mode === "room" || roomCode.trim() ? "Join room" : "Create room"} <ArrowRight size={17} /></>}</button>
       </form>
       <div className="join-foot"><span><span className="avatar-stack"><i>S</i><i>P</i><i>A</i></span> Made for teams like yours</span><span>Made for student teams</span></div>
     </section>
@@ -112,15 +181,17 @@ export default function CohortApp() {
 
   : <main className="workspace-shell">
     <header className="topbar">
-      <a className="workspace-brand" href="#home" aria-label="Cohort home"><div className="brand-mark"><MessageCircle size={19} fill="currentColor" /></div><span>cohort</span></a>
+      <a className="workspace-brand" href="/" aria-label="Cohort home"><div className="brand-mark"><MessageCircle size={19} fill="currentColor" /></div><span>cohort</span></a>
       <div className="topbar-divider" />
       <div className="room-heading"><span className="room-icon"><Command size={16} /></span><div><strong>{activeRoom.title}</strong><span>Project room</span></div><ChevronDown size={15} className="muted-icon" /></div>
       <div className="topbar-spacer" />
       <button className="room-code" onClick={copyCode} aria-label={`Copy room code ${activeRoom.code}`}><Hash size={14} /> {activeRoom.code} {copied ? <Check size={14} /> : <Clipboard size={13} />}</button>
+      <button className="invite-link-button" onClick={copyInviteLink} aria-label="Copy invite link"><Share2 size={14} /><span>Copy invite link</span></button>
       <div className="online-members"><span className="online-dot" /><span>{activeRoom.members.filter((member) => member.online).length} online</span><div className="mini-avatars">{activeRoom.members.slice(0, 3).map((member, index) => <span key={member.name} className={colors[index % colors.length]}>{initials(member.name)}</span>)}</div></div>
-      <button className="icon-button theme-button" aria-label={dark ? "Switch to light mode" : "Switch to dark mode"} onClick={() => setDark(!dark)}>{dark ? <Sun size={17} /> : <Moon size={17} />}</button>
-      <button className="user-menu" aria-label={`Signed in as ${name}`}><span className="user-avatar">{initials(name)}</span><ChevronDown size={14} /></button>
+      <button className="icon-button theme-button" aria-label={dark ? "Switch to light mode" : "Switch to dark mode"} onClick={toggleTheme}>{dark ? <Sun size={17} /> : <Moon size={17} />}</button>
+      <div className="room-menu-wrap"><button className="user-menu" aria-label={`Room options for ${name}`} aria-haspopup="menu" aria-expanded={roomMenuOpen} onClick={() => setRoomMenuOpen(!roomMenuOpen)}><span className="user-avatar">{initials(name)}</span><ChevronDown size={14} /></button>{roomMenuOpen && <div className="room-menu" role="menu"><button role="menuitem" onClick={() => void handleLeaveRoom()}><LogOut size={14} /> Leave room</button></div>}</div>
     </header>
+    {reconnecting && <div className="reconnect-banner" role="status"><span className="reconnect-dot" /> Reconnecting…</div>}
     <nav className="mobile-tabs" aria-label="Workspace sections">{["Chat", "Board", "Log"].map((tab) => <button key={tab} onClick={() => setActiveTab(tab)} className={activeTab === tab ? "selected" : ""}>{tab === "Chat" ? <MessageCircle size={15} /> : tab === "Board" ? <LayoutGrid size={15} /> : <ArrowUpRight size={15} />}{tab}</button>)}</nav>
     <div className="workspace-grid">
       <section className={`panel chat-panel ${activeTab !== "Chat" ? "mobile-hidden" : ""}`} aria-label="Team chat">
