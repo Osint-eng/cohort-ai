@@ -75,20 +75,20 @@ export default function CohortApp() {
 
   return !roomReady ? <main className="join-screen">
     <div className="join-orbit orbit-one" /><div className="join-orbit orbit-two" />
-    <header className="join-brand"><div className="brand-mark"><MessageCircle size={21} fill="currentColor" /></div><span>cohort</span><span className="brand-pill">TEAM SPACE</span></header>
+    <header className="join-brand"><div className="brand-mark"><MessageCircle size={21} fill="currentColor" /></div><span>cohort</span></header>
     <section className="join-card">
-      <div className="join-illustration"><div className="illus-circle"><Users size={27} /><span className="illus-spark">✦</span></div><span className="illus-bubble bubble-a">let’s make it happen</span><span className="illus-bubble bubble-b">you’ve got this!</span></div>
+      <div className="join-illustration"><div className="illus-circle"><Users size={27} /><span className="illus-spark">✦</span></div></div>
       <p className="eyebrow"><span className="live-dot" /> BUILT FOR THE GROUP PROJECT</p>
       <h1>Big ideas,<br /><span>better together.</span></h1>
       <p className="join-description">Your team&apos;s project manager that lives in the chat.</p>
       <form onSubmit={enterRoom} className="join-form">
         <label>Room code <span className="optional">OPTIONAL</span><div className="input-wrap"><Hash size={16} /><input value={roomCode} onChange={(event) => setRoomCode(event.target.value)} placeholder="Leave empty to create a room" /></div></label>
-        <label>Your name<div className="input-wrap"><span className="input-avatar">{name ? initials(name) : "?"}</span><input required value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Jamie Chen" /></div></label>
+        <label>Your name<div className="input-wrap"><span className="input-avatar">{name ? initials(name) : "?"}</span><input required value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Priya" /></div></label>
         <label>Project title <span className="optional">OPTIONAL</span><div className="input-wrap"><FileText size={16} /><input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="e.g. Campus Connect" /></div></label>
         {error && <p className="form-error" role="alert">{error}</p>}
         <button className="primary-button join-button" type="submit" disabled={joining}>{joining ? <LoaderCircle className="spin" size={17} /> : <>Create / Join room <ArrowRight size={17} /></>}</button>
       </form>
-      <div className="join-foot"><span><span className="avatar-stack"><i>S</i><i>P</i><i>A</i></span> Made for teams like yours</span><span>Free, always <span className="tiny-heart">♥</span></span></div>
+      <div className="join-foot"><span><span className="avatar-stack"><i>S</i><i>P</i><i>A</i></span> Made for teams like yours</span><span>Made for student teams</span></div>
     </section>
     <p className="join-bottom">Less herding cats. More making things. <span>✳</span></p>
   </main>
