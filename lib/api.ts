@@ -45,6 +45,23 @@ export async function joinRoom(input: { code?: string; name: string; title?: str
   return structuredClone(room)
 }
 export async function getRoom(code: string): Promise<Room> { await Promise.resolve(); return structuredClone(getOrCreate(code)) }
+export async function updateTaskStatus(code: string, taskId: string, status: TaskStatus, actor: string): Promise<Room> {
+  const room = getOrCreate(code)
+  const task = room.board.find((item) => item.id === taskId)
+  if (!task) throw new Error(`Task ${taskId} was not found`)
+  task.status = status
+  const action = status === "done" ? "completed" : status === "blocked" ? "blocked" : status === "in_progress" ? "started" : "moved to to do"
+  room.log.unshift({ actor, action, task_id: taskId, note: task.title, ts: new Date().toISOString() })
+  return structuredClone(room)
+}
+export async function reassignTask(code: string, taskId: string, owner: string, actor: string): Promise<Room> {
+  const room = getOrCreate(code)
+  const task = room.board.find((item) => item.id === taskId)
+  if (!task) throw new Error(`Task ${taskId} was not found`)
+  task.suggested_owner = owner.startsWith("@") ? owner : `@${owner}`
+  room.log.unshift({ actor, action: "reassigned", task_id: taskId, note: `Assigned to ${task.suggested_owner}`, ts: new Date().toISOString() })
+  return structuredClone(room)
+}
 export async function postMessage(code: string, name: string, text: string): Promise<Room> {
   const room = getOrCreate(code)
   room.messages.push({ name, text, ts: new Date().toISOString(), role: "user" })
