@@ -30,12 +30,22 @@ service cloud.firestore {
       return id is string && id.size() >= 2 && id.size() <= 32 && id.matches('^t[0-9]+$');
     }
 
-    function isRoomMember(roomCode) {
-      return isSignedIn() && exists(/databases/$(database)/documents/rooms/$(roomCode)/members/$(request.auth.uid));
+    function isRoomOwner(roomCode) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/rooms/$(roomCode))
+        && get(/databases/$(database)/documents/rooms/$(roomCode)).data.ownerId == request.auth.uid;
     }
 
-    function isRoomMemberAfter(roomCode) {
-      return isSignedIn() && existsAfter(/databases/$(database)/documents/rooms/$(roomCode)/members/$(request.auth.uid));
+    function isFullMember(roomCode) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/rooms/$(roomCode)/members/$(request.auth.uid))
+        && get(/databases/$(database)/documents/rooms/$(roomCode)/members/$(request.auth.uid)).data.role in ['owner', 'member'];
+    }
+
+    function isFullMemberAfter(roomCode) {
+      return isSignedIn()
+        && existsAfter(/databases/$(database)/documents/rooms/$(roomCode)/members/$(request.auth.uid))
+        && getAfter(/databases/$(database)/documents/rooms/$(roomCode)/members/$(request.auth.uid)).data.role in ['owner', 'member'];
     }
 
     function isValidRoom(data, roomCode) {
@@ -51,15 +61,32 @@ service cloud.firestore {
     }
 
     function isValidMember(data, memberId) {
-      return data.keys().hasAll(['uid', 'displayName', 'photoURL', 'role', 'online', 'joinedAt', 'lastSeenAt'])
-        && data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'role', 'online', 'joinedAt', 'lastSeenAt'])
-        && data.uid is string && data.uid == memberId && data.uid == request.auth.uid
+      return data.keys().hasAll(['uid', 'displayName', 'photoURL', 'role', 'status', 'online', 'joinedAt', 'lastSeenAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'role', 'status', 'online', 'joinedAt', 'lastSeenAt'])
+        && data.uid is string && data.uid == memberId
+        && isValidId(data.uid)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
         && data.photoURL is string && data.photoURL.size() <= 500
-        && data.role in ['owner', 'member']
+        && (
+          (data.role == 'owner' && data.status == 'active')
+          || (data.role == 'member' && data.status == 'active')
+          || (data.role == 'pending' && data.status == 'pending')
+        )
         && data.online is bool
         && data.joinedAt is timestamp
         && data.lastSeenAt is timestamp;
+    }
+
+    function isValidInvite(data, inviteId) {
+      return data.keys().hasAll(['id', 'createdBy', 'createdAt', 'expiresAt', 'maxUses', 'usedCount', 'active'])
+        && data.keys().hasOnly(['id', 'createdBy', 'createdAt', 'expiresAt', 'maxUses', 'usedCount', 'active'])
+        && data.id is string && data.id == inviteId && isValidId(data.id)
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.expiresAt is timestamp
+        && data.maxUses is int && data.maxUses >= 1 && data.maxUses <= 1000
+        && data.usedCount is int && data.usedCount >= 0 && data.usedCount <= data.maxUses
+        && data.active is bool;
     }
 
     function isValidMessage(data, messageId) {
@@ -124,7 +151,7 @@ service cloud.firestore {
       allow update: if isSignedIn()
         && isValidRoomCode(roomCode)
         && isValidRoom(incoming(), roomCode)
-        && isRoomMember(roomCode)
+        && isFullMember(roomCode)
         && incoming().ownerId == existing().ownerId
         && incoming().code == existing().code
         && incoming().createdAt == existing().createdAt
@@ -138,63 +165,127 @@ service cloud.firestore {
       match /members/{memberId} {
         allow get: if isValidRoomCode(roomCode)
           && isValidId(memberId)
-          && (isRoomMember(roomCode) || (isSignedIn() && memberId == request.auth.uid));
-        allow list: if isValidRoomCode(roomCode) && isRoomMember(roomCode);
+          && (isFullMember(roomCode) || isRoomOwner(roomCode) || (isSignedIn() && memberId == request.auth.uid));
+        allow list: if isValidRoomCode(roomCode) && (isFullMember(roomCode) || isRoomOwner(roomCode));
         allow create: if isSignedIn()
           && isValidRoomCode(roomCode)
           && isValidId(memberId)
           && memberId == request.auth.uid
           && isValidMember(incoming(), memberId)
+          && incoming().uid == request.auth.uid
           && incoming().joinedAt == request.time
           && incoming().lastSeenAt == request.time
           && existsAfter(/databases/$(database)/documents/rooms/$(roomCode))
           && (
-            (incoming().role == 'owner' && getAfter(/databases/$(database)/documents/rooms/$(roomCode)).data.ownerId == request.auth.uid)
-            || (incoming().role == 'member' && exists(/databases/$(database)/documents/rooms/$(roomCode)))
+            (incoming().role == 'owner' && incoming().status == 'active' && getAfter(/databases/$(database)/documents/rooms/$(roomCode)).data.ownerId == request.auth.uid)
+            || (incoming().role == 'pending' && incoming().status == 'pending' && exists(/databases/$(database)/documents/rooms/$(roomCode)))
           );
         allow update: if isSignedIn()
           && isValidRoomCode(roomCode)
           && isValidId(memberId)
-          && memberId == request.auth.uid
           && isValidMember(incoming(), memberId)
           && incoming().uid == existing().uid
-          && incoming().role == existing().role
           && incoming().joinedAt == existing().joinedAt
           && incoming().lastSeenAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'online', 'lastSeenAt']);
+          && (
+            // Self-update presence & profile (cannot escalate role)
+            (
+              memberId == request.auth.uid
+              && incoming().role == existing().role
+              && incoming().status == (existing().role == 'pending' ? 'pending' : 'active')
+              && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'status', 'online', 'lastSeenAt'])
+            )
+            // Owner-only approval from pending -> member
+            || (
+              isRoomOwner(roomCode)
+              && existing().role == 'pending'
+              && incoming().role == 'member'
+              && incoming().status == 'active'
+              && incoming().displayName == existing().displayName
+              && incoming().photoURL == existing().photoURL
+              && incoming().online == existing().online
+              && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status', 'lastSeenAt'])
+            )
+          );
         allow delete: if isSignedIn()
           && isValidRoomCode(roomCode)
           && isValidId(memberId)
-          && memberId == request.auth.uid;
+          && (memberId == request.auth.uid || (isRoomOwner(roomCode) && memberId != request.auth.uid));
+      }
+
+      match /invites/{inviteId} {
+        allow get: if isSignedIn() && isValidRoomCode(roomCode) && isValidId(inviteId);
+        allow list: if isValidRoomCode(roomCode) && isRoomOwner(roomCode);
+        allow create: if isSignedIn()
+          && isValidRoomCode(roomCode)
+          && isValidId(inviteId)
+          && isValidInvite(incoming(), inviteId)
+          && isRoomOwner(roomCode)
+          && incoming().createdBy == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().expiresAt > request.time
+          && incoming().usedCount == 0
+          && incoming().active == true;
+        allow update: if isSignedIn()
+          && isValidRoomCode(roomCode)
+          && isValidId(inviteId)
+          && isValidInvite(incoming(), inviteId)
+          && incoming().id == existing().id
+          && incoming().createdBy == existing().createdBy
+          && incoming().createdAt == existing().createdAt
+          && (
+            // Owner-only revoke or edit limits
+            (
+              isRoomOwner(roomCode)
+              && incoming().usedCount == existing().usedCount
+              && incoming().diff(existing()).affectedKeys().hasOnly(['active', 'expiresAt', 'maxUses'])
+            )
+            // Signed-in user redeeming a valid invite while joining the room
+            || (
+              existing().active == true
+              && request.time < existing().expiresAt
+              && existing().usedCount < existing().maxUses
+              && incoming().active == existing().active
+              && incoming().expiresAt == existing().expiresAt
+              && incoming().maxUses == existing().maxUses
+              && incoming().usedCount == existing().usedCount + 1
+              && incoming().diff(existing()).affectedKeys().hasOnly(['usedCount'])
+              && existsAfter(/databases/$(database)/documents/rooms/$(roomCode)/members/$(request.auth.uid))
+            )
+          );
+        allow delete: if isSignedIn()
+          && isValidRoomCode(roomCode)
+          && isValidId(inviteId)
+          && isRoomOwner(roomCode);
       }
 
       match /messages/{messageId} {
-        allow get: if isValidRoomCode(roomCode) && isValidId(messageId) && isRoomMember(roomCode);
-        allow list: if isValidRoomCode(roomCode) && isRoomMember(roomCode);
+        allow get: if isValidRoomCode(roomCode) && isValidId(messageId) && isFullMember(roomCode);
+        allow list: if isValidRoomCode(roomCode) && isFullMember(roomCode);
         allow create: if isSignedIn()
           && isValidRoomCode(roomCode)
           && isValidId(messageId)
           && isValidMessage(incoming(), messageId)
           && incoming().createdAt == request.time
-          && isRoomMemberAfter(roomCode);
+          && isFullMemberAfter(roomCode);
         allow update, delete: if false;
       }
 
       match /tasks/{taskId} {
-        allow get: if isValidRoomCode(roomCode) && isValidTaskId(taskId) && isRoomMember(roomCode);
-        allow list: if isValidRoomCode(roomCode) && isRoomMember(roomCode);
+        allow get: if isValidRoomCode(roomCode) && isValidTaskId(taskId) && isFullMember(roomCode);
+        allow list: if isValidRoomCode(roomCode) && isFullMember(roomCode);
         allow create: if isSignedIn()
           && isValidRoomCode(roomCode)
           && isValidTaskId(taskId)
           && isValidTask(incoming(), taskId)
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
-          && isRoomMember(roomCode);
+          && isFullMember(roomCode);
         allow update: if isSignedIn()
           && isValidRoomCode(roomCode)
           && isValidTaskId(taskId)
           && isValidTask(incoming(), taskId)
-          && isRoomMember(roomCode)
+          && isFullMember(roomCode)
           && incoming().id == existing().id
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
@@ -202,18 +293,18 @@ service cloud.firestore {
         allow delete: if isSignedIn()
           && isValidRoomCode(roomCode)
           && isValidTaskId(taskId)
-          && isRoomMember(roomCode);
+          && isFullMember(roomCode);
       }
 
       match /logs/{logId} {
-        allow get: if isValidRoomCode(roomCode) && isValidId(logId) && isRoomMember(roomCode);
-        allow list: if isValidRoomCode(roomCode) && isRoomMember(roomCode);
+        allow get: if isValidRoomCode(roomCode) && isValidId(logId) && isFullMember(roomCode);
+        allow list: if isValidRoomCode(roomCode) && isFullMember(roomCode);
         allow create: if isSignedIn()
           && isValidRoomCode(roomCode)
           && isValidId(logId)
           && isValidLogEntry(incoming(), logId)
           && incoming().createdAt == request.time
-          && isRoomMemberAfter(roomCode);
+          && isFullMemberAfter(roomCode);
         allow update, delete: if false;
       }
     }
@@ -238,7 +329,6 @@ service cloud.firestore {
         && incoming().uid == existing().uid
         && incoming().updatedAt == request.time
         && (
-          // Action 1: Increment or reset cohort AI command counter only
           (
             incoming().diff(existing()).affectedKeys().hasOnly(['cohortCount', 'cohortWindowStart', 'updatedAt'])
             && (
@@ -246,7 +336,6 @@ service cloud.firestore {
               || (request.time >= existing().cohortWindowStart + duration.value(590, 's') && incoming().cohortWindowStart == request.time && incoming().cohortCount == 1)
             )
           )
-          // Action 2: Increment or reset room creation counter only
           || (
             incoming().diff(existing()).affectedKeys().hasOnly(['roomCount', 'roomWindowStart', 'updatedAt'])
             && (

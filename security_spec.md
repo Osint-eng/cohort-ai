@@ -3,17 +3,23 @@
 ## 1. Data Invariants
 1. **Authentication & Verified Google Email Policy**: All reads and writes require a signed-in Google account with a verified email (`request.auth != null && request.auth.token.email_verified == true`). Unverified institutional/custom accounts are explicitly blocked at both Firestore Rules and API token verification, and surfaced with clear guidance in the UI.
 2. **Room Code Integrity**: Room documents are keyed strictly by 8 uppercase alphanumeric characters (`^[A-Z0-9]{8}$`). `list` on `/rooms` is disabled (`allow list: if false`) so rooms cannot be enumerated.
-3. **Master Gate Membership**: Any read or write inside `/rooms/{roomCode}/messages`, `/rooms/{roomCode}/tasks`, or `/rooms/{roomCode}/logs` requires the user to be an existing member at `/rooms/{roomCode}/members/{request.auth.uid}`.
+3. **Master Gate Membership & Owner Approval**:
+   - New users joining a room via code or invite link receive `role: "pending"`, `status: "pending"` (only room creators matching `rooms/{roomCode}.ownerId` may join initially as `role: "owner"`, `status: "active"`).
+   - Pending users can only read room metadata and their own member document. Only approved full members (`role` in `["owner", "member"]`) can read or write `/messages`, `/tasks`, or `/logs`, or list all `/members`.
+   - Only the room owner can promote a `pending` member to `member` (`status: "active"`) or reject/delete a pending member.
 4. **Identity Binding**:
-   - A member document `/rooms/{roomCode}/members/{memberId}` can only be created or updated by `request.auth.uid == memberId`, and `incoming().uid == request.auth.uid`.
+   - A member document `/rooms/{roomCode}/members/{memberId}` can only be created by `request.auth.uid == memberId` with `incoming().uid == request.auth.uid`, and self-updates cannot alter `role`.
    - User chat messages (`role == 'user'`) must have `senderId == request.auth.uid` and `triggeredBy == request.auth.uid`.
    - Assistant chat messages (`role == 'assistant'`) must have `senderId == 'cohort'` and `triggeredBy == request.auth.uid`.
    - Log entries must have `triggeredBy == request.auth.uid` and (`actorId == request.auth.uid` or `actorId == 'cohort'`).
-5. **PII Isolation**: No email addresses, phone numbers, or sensitive user PII are stored in `/rooms`, `/members`, or `/rateLimits` documents.
-6. **Temporal Integrity & Immutability**:
+5. **Expiring Invite Links**:
+   - Only the room owner can list, create, revoke, or delete `/rooms/{roomCode}/invites/{inviteId}`.
+   - Redeeming an invite requires `active == true`, `request.time < expiresAt`, `usedCount < maxUses`, strictly increments `usedCount` by `1`, and atomically creates the user's member document (`existsAfter`).
+6. **PII Isolation**: No email addresses, phone numbers, or sensitive user PII are stored in `/rooms`, `/members`, `/invites`, or `/rateLimits` documents.
+7. **Temporal Integrity & Immutability**:
    - `createdAt`, `joinedAt`, `updatedAt`, `lastSeenAt` must equal `request.time` on creation/update.
-   - `ownerId`, `code`, `createdAt`, `joinedAt`, `uid` are immutable after creation.
-7. **Strict Schemas, Board Caps & Rate Limits**: Every document write validates exact required/allowed keys (`hasAll` + `hasOnly`), types, enums, ID patterns, string length limits, a room task sequence cap (`nextTaskNumber <= 200`), and per-user sliding-window counters at `/rateLimits/{userId}` (10 rooms / 20 AI commands per 10 minutes).
+   - `ownerId`, `code`, `createdAt`, `joinedAt`, `uid`, `createdBy` are immutable after creation.
+8. **Strict Schemas, Board Caps & Rate Limits**: Every document write validates exact required/allowed keys (`hasAll` + `hasOnly`), types, enums, ID patterns, string length limits, a room task sequence cap (`nextTaskNumber <= 200`), and per-user sliding-window counters at `/rateLimits/{userId}` (10 rooms / 20 AI commands per 10 minutes).
 
 ## 2. The "Dirty Dozen" Payloads (Adversarial Tests)
 1. **Unauthenticated Room Read/Write**: Unauthenticated user tries to read `/rooms/ABCD1234` -> `PERMISSION_DENIED`.

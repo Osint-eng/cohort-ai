@@ -72,8 +72,13 @@
         },
         "role": {
           "type": "string",
-          "enum": ["owner", "member"],
+          "enum": ["owner", "member", "pending"],
           "description": "Role within the room."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "pending"],
+          "description": "Approval status within the room."
         },
         "online": {
           "type": "boolean",
@@ -90,7 +95,7 @@
           "description": "Server timestamp of the last presence update."
         }
       },
-      "required": ["uid", "displayName", "photoURL", "role", "online", "joinedAt", "lastSeenAt"]
+      "required": ["uid", "displayName", "photoURL", "role", "status", "online", "joinedAt", "lastSeenAt"]
     },
     "Message": {
       "title": "Message",
@@ -297,6 +302,50 @@
         }
       },
       "required": ["uid", "roomWindowStart", "roomCount", "cohortWindowStart", "cohortCount", "updatedAt"]
+    },
+    "Invite": {
+      "title": "Invite",
+      "description": "Temporary expiring invite link for a project room.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Invite document ID."
+        },
+        "createdBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the room owner who generated the invite."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the invite was created."
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp after which the invite can no longer be used."
+        },
+        "maxUses": {
+          "type": "integer",
+          "description": "Maximum number of joins allowed via this invite."
+        },
+        "usedCount": {
+          "type": "integer",
+          "description": "Number of times the invite has been redeemed."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the invite is active or has been revoked."
+        }
+      },
+      "required": ["id", "createdBy", "createdAt", "expiresAt", "maxUses", "usedCount", "active"]
     }
   },
   "firestore": {
@@ -307,6 +356,10 @@
     "/rooms/{roomCode}/members/{memberId}": {
       "schema": { "$ref": "#/entities/Member" },
       "description": "Authenticated room members keyed by Firebase Auth UID."
+    },
+    "/rooms/{roomCode}/invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/Invite" },
+      "description": "Temporary expiring invite links created by the room owner."
     },
     "/rooms/{roomCode}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/Message" },

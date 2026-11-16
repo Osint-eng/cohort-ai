@@ -39,6 +39,7 @@ export async function runSecurityAudit() {
     displayName: 'Alice',
     photoURL: '',
     role: 'owner',
+    status: 'active',
     online: true,
     joinedAt: serverTimestamp(),
     lastSeenAt: serverTimestamp(),

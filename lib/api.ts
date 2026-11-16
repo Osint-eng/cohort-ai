@@ -3,6 +3,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  increment,
   onSnapshot,
   orderBy,
   query,
@@ -41,13 +42,24 @@ export type Message = {
   ts: string
   role: "user" | "assistant"
 }
+export type MemberRole = "owner" | "member" | "pending"
 export type Member = {
   uid: string
   name: string
   photoURL: string
-  role: "owner" | "member"
+  role: MemberRole
+  status: "active" | "pending"
   online: boolean
   lastSeenAt: string
+}
+export type Invite = {
+  id: string
+  createdBy: string
+  createdAt: string
+  expiresAt: string
+  maxUses: number
+  usedCount: number
+  active: boolean
 }
 export type RoomMeta = {
   code: string
@@ -60,6 +72,13 @@ export class RoomNotFoundError extends Error {
   constructor() {
     super("Room not found")
     this.name = "RoomNotFoundError"
+  }
+}
+
+export class InviteExpiredOrLimitError extends Error {
+  constructor() {
+    super("This invite link has expired or reached its limit")
+    this.name = "InviteExpiredOrLimitError"
   }
 }
 
@@ -93,6 +112,7 @@ export function isMemberOnline(member: Member, nowMs = Date.now()): boolean {
 }
 
 export function formatMemberLastSeen(member: Member, nowMs = Date.now()): string {
+  if (member.role === "pending") return "Pending"
   if (isMemberOnline(member, nowMs)) return "online"
   const seenMs = Date.parse(member.lastSeenAt)
   if (Number.isNaN(seenMs)) return "away"
@@ -110,11 +130,13 @@ export function getFriendlyErrorMessage(
   if (error instanceof RoomNotFoundError) {
     return "Room not found. Check the code and try again."
   }
+  if (error instanceof InviteExpiredOrLimitError) {
+    return error.message
+  }
 
   const raw = error instanceof Error ? error.message : typeof error === "string" ? error : ""
   if (!raw) return fallback
 
-  // Unwrap structured FirestoreErrorInfo JSON thrown by handleFirestoreError
   if (raw.startsWith("{")) {
     try {
       const parsed = JSON.parse(raw) as {
@@ -127,7 +149,7 @@ export function getFriendlyErrorMessage(
         if (parsed.authInfo?.emailVerified === false) {
           return "Your Google account email isn’t verified. Please sign in with a verified Google account."
         }
-        return "You don’t have permission to update this room. Make sure you’re signed in as a room member."
+        return "You don’t have permission to perform this action in this room."
       }
       if (lowerInner.includes("unauthenticated") || lowerInner.includes("auth")) {
         return "Your sign-in session expired. Please sign in again."
@@ -145,11 +167,17 @@ export function getFriendlyErrorMessage(
   }
 
   const lower = raw.toLowerCase()
+  if (lower.includes("invite link has expired") || lower.includes("reached its limit")) {
+    return "This invite link has expired or reached its limit"
+  }
   if (lower.includes("email is not verified") || lower.includes("verified google account")) {
     return "Your Google account email isn’t verified. Please sign in with a verified Google account."
   }
+  if (lower.includes("waiting for the room owner")) {
+    return raw
+  }
   if (lower.includes("missing or insufficient permissions") || lower.includes("permission-denied")) {
-    return "You don’t have permission for that action. Please check your sign-in and room membership."
+    return "You don’t have permission for that action. Please check your sign-in and room approval status."
   }
   if (lower.includes("too many") || lower.includes("reached the limit")) {
     return raw
@@ -209,7 +237,11 @@ export async function createRoomOnServer(user: User, title?: string): Promise<st
   return data.code
 }
 
-export async function ensureRoomMembership(rawCode: string, user: User): Promise<RoomMeta> {
+export async function ensureRoomMembership(
+  rawCode: string,
+  user: User,
+  inviteId?: string
+): Promise<{ meta: RoomMeta; memberRole: MemberRole }> {
   const code = normalizeRoomCode(rawCode)
   if (!ROOM_CODE_REGEX.test(code)) {
     throw new RoomNotFoundError()
@@ -235,15 +267,79 @@ export async function ensureRoomMembership(rawCode: string, user: User): Promise
   const roomData = roomSnap.data()
   const displayName = getUserDisplayName(user)
   const photoURL = (user.photoURL || "").slice(0, 500)
+  const meta: RoomMeta = {
+    code,
+    title: String(roomData.title || "Project room"),
+    summary: String(roomData.summary || ""),
+    ownerId: String(roomData.ownerId || ""),
+  }
 
   if (!memberSnap.exists()) {
-    const role = roomData.ownerId === user.uid ? "owner" : "member"
+    const isOwner = roomData.ownerId === user.uid
+    const initialRole: MemberRole = isOwner ? "owner" : "pending"
+    const initialStatus: "active" | "pending" = isOwner ? "active" : "pending"
+    const cleanInviteId = inviteId?.trim() || ""
+
+    if (cleanInviteId && !isOwner) {
+      const invitePath = `rooms/${code}/invites/${cleanInviteId}`
+      const inviteRef = doc(db, "rooms", code, "invites", cleanInviteId)
+      let inviteSnap
+      try {
+        inviteSnap = await getDoc(inviteRef)
+      } catch (error) {
+        handleFirestoreError(error, OperationType.GET, invitePath)
+      }
+
+      if (!inviteSnap.exists()) {
+        throw new InviteExpiredOrLimitError()
+      }
+
+      const inviteData = inviteSnap.data()
+      const expiresAtIso = timestampToIso(inviteData.expiresAt)
+      const expiresAtMs = Date.parse(expiresAtIso)
+      const maxUses = typeof inviteData.maxUses === "number" ? inviteData.maxUses : 10
+      const usedCount = typeof inviteData.usedCount === "number" ? inviteData.usedCount : 0
+      const isValid =
+        inviteData.active === true &&
+        !Number.isNaN(expiresAtMs) &&
+        expiresAtMs > Date.now() &&
+        usedCount < maxUses
+
+      if (!isValid) {
+        throw new InviteExpiredOrLimitError()
+      }
+
+      const batch = writeBatch(db)
+      batch.set(memberRef, {
+        uid: user.uid,
+        displayName,
+        photoURL,
+        role: initialRole,
+        status: initialStatus,
+        online: true,
+        joinedAt: serverTimestamp(),
+        lastSeenAt: serverTimestamp(),
+      })
+      batch.update(inviteRef, {
+        usedCount: increment(1),
+      })
+
+      try {
+        await batch.commit()
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, invitePath)
+      }
+
+      return { meta, memberRole: initialRole }
+    }
+
     try {
       await setDoc(memberRef, {
         uid: user.uid,
         displayName,
         photoURL,
-        role,
+        role: initialRole,
+        status: initialStatus,
         online: true,
         joinedAt: serverTimestamp(),
         lastSeenAt: serverTimestamp(),
@@ -251,37 +347,241 @@ export async function ensureRoomMembership(rawCode: string, user: User): Promise
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, memberPath)
     }
-  } else {
-    const existing = memberSnap.data()
-    const lastSeenIso = timestampToIso(existing.lastSeenAt)
-    const lastSeenMs = Date.parse(lastSeenIso)
-    const recentlyUpdated = !Number.isNaN(lastSeenMs) && Date.now() - lastSeenMs < 30_000
-    const unchangedProfile =
-      existing.displayName === displayName &&
-      existing.photoURL === photoURL &&
-      existing.online === true
 
-    // Avoid redundant write right after server-side room creation or recent heartbeat
-    if (!(recentlyUpdated && unchangedProfile)) {
-      try {
-        await updateDoc(memberRef, {
-          displayName,
-          photoURL,
-          online: true,
-          lastSeenAt: serverTimestamp(),
-        })
-      } catch (error) {
-        handleFirestoreError(error, OperationType.UPDATE, memberPath)
-      }
+    return { meta, memberRole: initialRole }
+  }
+
+  const existing = memberSnap.data()
+  const existingRole: MemberRole =
+    existing.role === "owner" ? "owner" : existing.role === "member" ? "member" : "pending"
+  const expectedStatus: "active" | "pending" = existingRole === "pending" ? "pending" : "active"
+  const lastSeenIso = timestampToIso(existing.lastSeenAt)
+  const lastSeenMs = Date.parse(lastSeenIso)
+  const recentlyUpdated = !Number.isNaN(lastSeenMs) && Date.now() - lastSeenMs < 30_000
+  const unchangedProfile =
+    existing.displayName === displayName &&
+    existing.photoURL === photoURL &&
+    existing.status === expectedStatus &&
+    existing.online === true
+
+  if (!(recentlyUpdated && unchangedProfile)) {
+    try {
+      await updateDoc(memberRef, {
+        displayName,
+        photoURL,
+        status: expectedStatus,
+        online: true,
+        lastSeenAt: serverTimestamp(),
+      })
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, memberPath)
     }
   }
 
-  return {
-    code,
-    title: String(roomData.title || "Project room"),
-    summary: String(roomData.summary || ""),
-    ownerId: String(roomData.ownerId || ""),
+  return { meta, memberRole: existingRole }
+}
+
+export async function approvePendingMember(rawCode: string, memberUid: string): Promise<void> {
+  const code = normalizeRoomCode(rawCode)
+  const memberPath = `rooms/${code}/members/${memberUid}`
+  try {
+    await updateDoc(doc(db, "rooms", code, "members", memberUid), {
+      role: "member",
+      status: "active",
+      lastSeenAt: serverTimestamp(),
+    })
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, memberPath)
   }
+}
+
+export async function rejectPendingMember(rawCode: string, memberUid: string): Promise<void> {
+  const code = normalizeRoomCode(rawCode)
+  const memberPath = `rooms/${code}/members/${memberUid}`
+  try {
+    await deleteDoc(doc(db, "rooms", code, "members", memberUid))
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, memberPath)
+  }
+}
+
+export async function createTemporaryInvite(
+  rawCode: string,
+  user: User,
+  options: { expiresInHours: number; maxUses?: number }
+): Promise<{ inviteId: string; url: string }> {
+  const code = normalizeRoomCode(rawCode)
+  const inviteId = makeClientId("inv")
+  const invitePath = `rooms/${code}/invites/${inviteId}`
+  const maxUses = Math.max(1, Math.min(1000, Math.floor(options.maxUses ?? 10)))
+  const expiresAtDate = new Date(Date.now() + options.expiresInHours * 60 * 60 * 1000)
+
+  try {
+    await setDoc(doc(db, "rooms", code, "invites", inviteId), {
+      id: inviteId,
+      createdBy: user.uid,
+      createdAt: serverTimestamp(),
+      expiresAt: Timestamp.fromDate(expiresAtDate),
+      maxUses,
+      usedCount: 0,
+      active: true,
+    })
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, invitePath)
+  }
+
+  const origin = typeof window !== "undefined" ? window.location.origin : ""
+  const url = `${origin}/join?invite=${encodeURIComponent(inviteId)}&room=${encodeURIComponent(code)}`
+  return { inviteId, url }
+}
+
+export async function revokeInvite(rawCode: string, inviteId: string): Promise<void> {
+  const code = normalizeRoomCode(rawCode)
+  const invitePath = `rooms/${code}/invites/${inviteId}`
+  try {
+    await updateDoc(doc(db, "rooms", code, "invites", inviteId), {
+      active: false,
+    })
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, invitePath)
+  }
+}
+
+export async function validateInviteLink(
+  rawCode: string,
+  inviteId: string
+): Promise<{ valid: boolean; remainingUses?: number; expiresAt?: string }> {
+  const code = normalizeRoomCode(rawCode)
+  const cleanInviteId = inviteId.trim()
+  if (!ROOM_CODE_REGEX.test(code) || !cleanInviteId) {
+    return { valid: false }
+  }
+
+  const invitePath = `rooms/${code}/invites/${cleanInviteId}`
+  let snap
+  try {
+    snap = await getDoc(doc(db, "rooms", code, "invites", cleanInviteId))
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, invitePath)
+  }
+
+  if (!snap.exists()) {
+    return { valid: false }
+  }
+
+  const data = snap.data()
+  const expiresAtIso = timestampToIso(data.expiresAt)
+  const expiresAtMs = Date.parse(expiresAtIso)
+  const maxUses = typeof data.maxUses === "number" ? data.maxUses : 10
+  const usedCount = typeof data.usedCount === "number" ? data.usedCount : 0
+  const valid =
+    data.active === true &&
+    !Number.isNaN(expiresAtMs) &&
+    expiresAtMs > Date.now() &&
+    usedCount < maxUses
+
+  return {
+    valid,
+    remainingUses: Math.max(0, maxUses - usedCount),
+    expiresAt: expiresAtIso,
+  }
+}
+
+export function subscribeToPendingRoom(
+  rawCode: string,
+  uid: string,
+  callbacks: {
+    onRoom: (meta: RoomMeta) => void
+    onMemberRole: (role: MemberRole) => void
+    onRejected: () => void
+    onNotFound: () => void
+    onError: (err: Error) => void
+  }
+): () => void {
+  const code = normalizeRoomCode(rawCode)
+
+  const unsubRoom = onSnapshot(
+    doc(db, "rooms", code),
+    (snap) => {
+      if (!snap.exists()) {
+        callbacks.onNotFound()
+        return
+      }
+      const d = snap.data()
+      callbacks.onRoom({
+        code,
+        title: String(d.title || "Project room"),
+        summary: String(d.summary || ""),
+        ownerId: String(d.ownerId || ""),
+      })
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.GET, `rooms/${code}`)
+      } catch (wrapped) {
+        callbacks.onError(wrapped as Error)
+      }
+    }
+  )
+
+  const unsubSelfMember = onSnapshot(
+    doc(db, "rooms", code, "members", uid),
+    (snap) => {
+      if (!snap.exists()) {
+        callbacks.onRejected()
+        return
+      }
+      const data = snap.data()
+      const role: MemberRole =
+        data.role === "owner" ? "owner" : data.role === "member" ? "member" : "pending"
+      callbacks.onMemberRole(role)
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.GET, `rooms/${code}/members/${uid}`)
+      } catch (wrapped) {
+        callbacks.onError(wrapped as Error)
+      }
+    }
+  )
+
+  return () => {
+    unsubRoom()
+    unsubSelfMember()
+  }
+}
+
+export function subscribeToRoomInvites(
+  rawCode: string,
+  onInvites: (invites: Invite[]) => void,
+  onError: (err: Error) => void
+): () => void {
+  const code = normalizeRoomCode(rawCode)
+  return onSnapshot(
+    query(collection(db, "rooms", code, "invites"), orderBy("createdAt", "desc")),
+    (snap) => {
+      const list: Invite[] = snap.docs.map((d) => {
+        const data = d.data()
+        return {
+          id: String(data.id || d.id),
+          createdBy: String(data.createdBy || ""),
+          createdAt: timestampToIso(data.createdAt),
+          expiresAt: timestampToIso(data.expiresAt),
+          maxUses: typeof data.maxUses === "number" ? data.maxUses : 10,
+          usedCount: typeof data.usedCount === "number" ? data.usedCount : 0,
+          active: Boolean(data.active),
+        }
+      })
+      onInvites(list)
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, `rooms/${code}/invites`)
+      } catch (wrapped) {
+        onError(wrapped as Error)
+      }
+    }
+  )
 }
 
 export async function setMemberPresence(code: string, user: User, online: boolean): Promise<void> {
@@ -353,16 +653,20 @@ export function subscribeToRoom(
     (snap) => {
       const list: Member[] = snap.docs.map((d) => {
         const data = d.data()
+        const role: MemberRole =
+          data.role === "owner" ? "owner" : data.role === "member" ? "member" : "pending"
         return {
           uid: String(data.uid || d.id),
           name: String(data.displayName || "Teammate"),
           photoURL: String(data.photoURL || ""),
-          role: data.role === "owner" ? "owner" : "member",
+          role,
+          status: role === "pending" ? "pending" : "active",
           online: Boolean(data.online),
           lastSeenAt: timestampToIso(data.lastSeenAt),
         }
       })
-      list.sort((a, b) => (a.role === b.role ? a.name.localeCompare(b.name) : a.role === "owner" ? -1 : 1))
+      const rank = { pending: 0, owner: 1, member: 2 }
+      list.sort((a, b) => (a.role === b.role ? a.name.localeCompare(b.name) : rank[a.role] - rank[b.role]))
       callbacks.onMembers(list)
     },
     (error) => {

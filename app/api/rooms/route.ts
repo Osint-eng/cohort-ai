@@ -72,6 +72,7 @@ export async function POST(req: NextRequest) {
                 displayName: user.displayName,
                 photoURL: user.photoURL,
                 role: "owner",
+                status: "active",
                 online: true,
               },
               serverTimestampFields: ["joinedAt", "lastSeenAt"],

@@ -13,15 +13,18 @@ import {
   ArrowDown,
   ArrowRight,
   ArrowUpRight,
+  Ban,
   Bot,
   Check,
   ChevronDown,
   CircleHelp,
   Clipboard,
+  Clock,
   Command,
   FileText,
   Hash,
   LayoutGrid,
+  Link2,
   List,
   LoaderCircle,
   LogIn,
@@ -32,32 +35,45 @@ import {
   Plus,
   Send,
   Share2,
+  ShieldCheck,
   Sparkles,
   Sun,
+  UserCheck,
   Users,
+  UserX,
   X,
 } from "lucide-react"
 import { auth, googleProvider, validateFirestoreConnection } from "@/lib/firebase"
 import {
+  approvePendingMember,
   createRoomOnServer,
+  createTemporaryInvite,
   ensureRoomMembership,
   formatMemberLastSeen,
   getFriendlyErrorMessage,
   getUserDisplayName,
+  InviteExpiredOrLimitError,
   isMemberOnline,
   leaveRoomMembership,
   normalizeRoomCode,
   reassignTaskFirestore,
+  rejectPendingMember,
+  revokeInvite,
   ROOM_CODE_REGEX,
   RoomNotFoundError,
   runCohortCommand,
   sendChatMessage,
   setMemberPresence,
+  subscribeToPendingRoom,
   subscribeToRoom,
+  subscribeToRoomInvites,
   suggestDefaultRoomTitle,
   updateTaskStatusFirestore,
+  validateInviteLink,
+  type Invite,
   type LogEntry,
   type Member,
+  type MemberRole,
   type Message,
   type RoomMeta,
   type Task,
@@ -116,7 +132,15 @@ const relativeTime = (ts: string) => {
 
 const themeStorageKey = "cohort-theme"
 
-export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; code?: string }) {
+export default function CohortApp({
+  mode,
+  code = "",
+  inviteId = "",
+}: {
+  mode: "join" | "room"
+  code?: string
+  inviteId?: string
+}) {
   const router = useRouter()
   const normalizedRouteCode = normalizeRoomCode(code)
 
@@ -125,12 +149,20 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
   const [signingIn, setSigningIn] = useState(false)
 
   const [roomMeta, setRoomMeta] = useState<RoomMeta | null>(null)
+  const [memberRole, setMemberRole] = useState<MemberRole | null>(null)
+  const [requestRejected, setRequestRejected] = useState(false)
   const [members, setMembers] = useState<Member[]>([])
   const [messages, setMessages] = useState<Message[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [logs, setLogs] = useState<LogEntry[]>([])
+  const [invites, setInvites] = useState<Invite[]>([])
 
-  const [roomCode, setRoomCode] = useState("")
+  const [activeInviteId, setActiveInviteId] = useState(() => inviteId.trim())
+  const [inviteCheckStatus, setInviteCheckStatus] = useState<"idle" | "checking" | "valid" | "invalid">("idle")
+  const [inviteRemainingUses, setInviteRemainingUses] = useState<number | null>(null)
+  const [roomCode, setRoomCode] = useState(() =>
+    mode === "join" && ROOM_CODE_REGEX.test(normalizedRouteCode) ? normalizedRouteCode : ""
+  )
   const [projectTitle, setProjectTitle] = useState("")
   const [isJoined, setIsJoined] = useState(false)
   const [roomLoading, setRoomLoading] = useState(mode === "room")
@@ -154,6 +186,13 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
   const [error, setError] = useState("")
   const [taskMenuId, setTaskMenuId] = useState<string | null>(null)
   const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null)
+  const [approvingUid, setApprovingUid] = useState<string | null>(null)
+  const [invitePanelOpen, setInvitePanelOpen] = useState(false)
+  const [inviteExpiryHours, setInviteExpiryHours] = useState<24 | 48 | 168>(24)
+  const [inviteMaxUses, setInviteMaxUses] = useState("10")
+  const [creatingInvite, setCreatingInvite] = useState(false)
+  const [revokingInviteId, setRevokingInviteId] = useState<string | null>(null)
+  const [latestInviteUrl, setLatestInviteUrl] = useState("")
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [myRoomsOpen, setMyRoomsOpen] = useState(false)
   const [recentRooms, setRecentRooms] = useState<Array<{ code: string; title: string }>>([])
@@ -161,6 +200,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
 
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const leftRoomRef = useRef(false)
+  const rejectedRef = useRef(false)
 
   const showToast = (msg: string, tone: "success" | "error" = "success") => {
     setToastTone(tone)
@@ -183,6 +223,61 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
   }, [])
 
   useEffect(() => {
+    if (mode !== "join") return
+    const cleanInvite = inviteId.trim()
+    setActiveInviteId(cleanInvite)
+    if (ROOM_CODE_REGEX.test(normalizedRouteCode)) {
+      setRoomCode(normalizedRouteCode)
+    } else if (cleanInvite && normalizedRouteCode) {
+      setRoomCode(normalizedRouteCode)
+    }
+  }, [mode, normalizedRouteCode, inviteId])
+
+  useEffect(() => {
+    if (mode !== "join") return
+    if (!activeInviteId) {
+      setInviteCheckStatus("idle")
+      setInviteRemainingUses(null)
+      return
+    }
+    if (!ROOM_CODE_REGEX.test(roomCode)) {
+      setInviteCheckStatus("invalid")
+      setInviteRemainingUses(null)
+      setError("This invite link has expired or reached its limit")
+      return
+    }
+    if (!user || user.emailVerified === false) {
+      setInviteCheckStatus("idle")
+      return
+    }
+
+    let cancelled = false
+    setInviteCheckStatus("checking")
+    setError("")
+    validateInviteLink(roomCode, activeInviteId)
+      .then((res) => {
+        if (cancelled) return
+        if (res.valid) {
+          setInviteCheckStatus("valid")
+          setInviteRemainingUses(res.remainingUses ?? null)
+        } else {
+          setInviteCheckStatus("invalid")
+          setInviteRemainingUses(0)
+          setError("This invite link has expired or reached its limit")
+        }
+      })
+      .catch(() => {
+        if (cancelled) return
+        setInviteCheckStatus("invalid")
+        setError("This invite link has expired or reached its limit")
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [mode, user, activeInviteId, roomCode])
+
+  useEffect(() => {
     if (mode !== "room") return
 
     if (!ROOM_CODE_REGEX.test(normalizedRouteCode)) {
@@ -196,64 +291,29 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
       return
     }
 
-    if (!user) {
+    if (!user || user.emailVerified === false) {
       setIsJoined(false)
-      setRoomLoading(false)
-      return
-    }
-
-    if (user.emailVerified === false) {
-      setIsJoined(false)
+      setMemberRole(null)
       setRoomLoading(false)
       return
     }
 
     let active = true
-    let unsubRoom: (() => void) | null = null
     leftRoomRef.current = false
+    rejectedRef.current = false
     setRoomLoading(true)
     setRoomNotFound(false)
+    setRequestRejected(false)
+    setMemberRole(null)
     setError("")
 
     ensureRoomMembership(normalizedRouteCode, user)
-      .then((meta) => {
+      .then(({ meta, memberRole: nextRole }) => {
         if (!active) return
         setRoomMeta(meta)
+        setMemberRole(nextRole)
         setIsJoined(true)
         setRoomLoading(false)
-
-        unsubRoom = subscribeToRoom(normalizedRouteCode, {
-          onRoom: (nextMeta) => {
-            if (!active) return
-            setRoomMeta(nextMeta)
-            setReconnecting(false)
-          },
-          onMembers: (nextMembers) => {
-            if (!active) return
-            setMembers(nextMembers)
-          },
-          onMessages: (nextMessages) => {
-            if (!active) return
-            setMessages(nextMessages)
-          },
-          onTasks: (nextTasks) => {
-            if (!active) return
-            setTasks(nextTasks)
-          },
-          onLogs: (nextLogs) => {
-            if (!active) return
-            setLogs(nextLogs)
-          },
-          onNotFound: () => {
-            if (!active) return
-            setRoomNotFound(true)
-            setIsJoined(false)
-          },
-          onError: () => {
-            if (!active) return
-            setReconnecting(true)
-          },
-        })
       })
       .catch((cause) => {
         if (!active) return
@@ -265,23 +325,22 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
         setRoomLoading(false)
       })
 
-    // Periodic heartbeat + visibility sync so presence expires cleanly via lastSeenAt TTL
     const heartbeatId = window.setInterval(() => {
       setNowMs(Date.now())
-      if (document.visibilityState === "visible" && !leftRoomRef.current) {
+      if (document.visibilityState === "visible" && !leftRoomRef.current && !rejectedRef.current) {
         void setMemberPresence(normalizedRouteCode, user, true).catch(() => {})
       }
     }, 45_000)
 
     const handleVisibilityChange = () => {
       setNowMs(Date.now())
-      if (leftRoomRef.current) return
+      if (leftRoomRef.current || rejectedRef.current) return
       const visible = document.visibilityState === "visible"
       void setMemberPresence(normalizedRouteCode, user, visible).catch(() => {})
     }
 
     const handleBeforeUnload = () => {
-      if (!leftRoomRef.current) {
+      if (!leftRoomRef.current && !rejectedRef.current) {
         void setMemberPresence(normalizedRouteCode, user, false).catch(() => {})
       }
     }
@@ -293,12 +352,113 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
       window.clearInterval(heartbeatId)
       document.removeEventListener("visibilitychange", handleVisibilityChange)
       window.removeEventListener("beforeunload", handleBeforeUnload)
-      if (unsubRoom) unsubRoom()
-      if (!leftRoomRef.current) {
+      if (!leftRoomRef.current && !rejectedRef.current) {
         void setMemberPresence(normalizedRouteCode, user, false).catch(() => {})
       }
     }
   }, [mode, normalizedRouteCode, authLoading, user])
+
+  useEffect(() => {
+    if (mode !== "room" || !user || user.emailVerified === false || !isJoined || !memberRole) {
+      return
+    }
+
+    let active = true
+
+    if (memberRole === "pending") {
+      const unsubPending = subscribeToPendingRoom(normalizedRouteCode, user.uid, {
+        onRoom: (nextMeta) => {
+          if (!active) return
+          setRoomMeta(nextMeta)
+          setReconnecting(false)
+        },
+        onMemberRole: (nextRole) => {
+          if (!active) return
+          if (nextRole === "owner" || nextRole === "member") {
+            setMemberRole(nextRole)
+            showToast("Your join request was approved!")
+          }
+        },
+        onRejected: () => {
+          if (!active) return
+          rejectedRef.current = true
+          setRequestRejected(true)
+          setIsJoined(false)
+          setMemberRole(null)
+        },
+        onNotFound: () => {
+          if (!active) return
+          setRoomNotFound(true)
+          setIsJoined(false)
+          setMemberRole(null)
+        },
+        onError: () => {
+          if (!active) return
+          setReconnecting(true)
+        },
+      })
+
+      return () => {
+        active = false
+        unsubPending()
+      }
+    }
+
+    const unsubRoom = subscribeToRoom(normalizedRouteCode, {
+      onRoom: (nextMeta) => {
+        if (!active) return
+        setRoomMeta(nextMeta)
+        setReconnecting(false)
+      },
+      onMembers: (nextMembers) => {
+        if (!active) return
+        setMembers(nextMembers)
+        const self = nextMembers.find((m) => m.uid === user.uid)
+        if (self && self.role !== memberRole) {
+          setMemberRole(self.role)
+        }
+      },
+      onMessages: (nextMessages) => {
+        if (!active) return
+        setMessages(nextMessages)
+      },
+      onTasks: (nextTasks) => {
+        if (!active) return
+        setTasks(nextTasks)
+      },
+      onLogs: (nextLogs) => {
+        if (!active) return
+        setLogs(nextLogs)
+      },
+      onNotFound: () => {
+        if (!active) return
+        setRoomNotFound(true)
+        setIsJoined(false)
+      },
+      onError: () => {
+        if (!active) return
+        setReconnecting(true)
+      },
+    })
+
+    const unsubInvites =
+      memberRole === "owner"
+        ? subscribeToRoomInvites(
+            normalizedRouteCode,
+            (nextInvites) => {
+              if (!active) return
+              setInvites(nextInvites)
+            },
+            () => {}
+          )
+        : null
+
+    return () => {
+      active = false
+      unsubRoom()
+      if (unsubInvites) unsubInvites()
+    }
+  }, [mode, normalizedRouteCode, user, isJoined, memberRole])
 
   useEffect(() => {
     if (!toast) return
@@ -401,8 +561,16 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
 
     try {
       if (trimmedCode) {
-        await ensureRoomMembership(trimmedCode, user)
-        showToast("Welcome to your room")
+        const { memberRole: nextRole } = await ensureRoomMembership(
+          trimmedCode,
+          user,
+          activeInviteId || undefined
+        )
+        showToast(
+          nextRole === "pending"
+            ? "Join request sent — waiting for owner approval"
+            : "Welcome to your room"
+        )
         router.push(`/room/${trimmedCode}`)
       } else {
         const finalTitle = trimmedTitle || suggestDefaultRoomTitle(user)
@@ -412,9 +580,14 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
       }
     } catch (cause) {
       const friendly =
-        cause instanceof RoomNotFoundError
-          ? "Room not found. Check the code and try again, or create a new room."
-          : getFriendlyErrorMessage(cause, "We couldn’t open that room. Please try again.")
+        cause instanceof InviteExpiredOrLimitError
+          ? "This invite link has expired or reached its limit"
+          : cause instanceof RoomNotFoundError
+            ? "Room not found. Check the code and try again, or create a new room."
+            : getFriendlyErrorMessage(cause, "We couldn’t open that room. Please try again.")
+      if (cause instanceof InviteExpiredOrLimitError) {
+        setInviteCheckStatus("invalid")
+      }
       setError(friendly)
       showToast(friendly, "error")
       setJoining(false)
@@ -558,6 +731,87 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
     router.push("/join")
   }
 
+  const handleApproveMember = async (member: Member) => {
+    if (!roomMeta || approvingUid) return
+    setApprovingUid(member.uid)
+    setError("")
+    try {
+      await approvePendingMember(roomMeta.code, member.uid)
+      showToast(`Approved ${member.name}`)
+    } catch (cause) {
+      const friendly = getFriendlyErrorMessage(cause, "Could not approve join request.")
+      setError(friendly)
+      showToast(friendly, "error")
+    } finally {
+      setApprovingUid(null)
+    }
+  }
+
+  const handleRejectMember = async (member: Member) => {
+    if (!roomMeta || approvingUid) return
+    setApprovingUid(member.uid)
+    setError("")
+    try {
+      await rejectPendingMember(roomMeta.code, member.uid)
+      showToast(`Declined ${member.name}`)
+    } catch (cause) {
+      const friendly = getFriendlyErrorMessage(cause, "Could not decline join request.")
+      setError(friendly)
+      showToast(friendly, "error")
+    } finally {
+      setApprovingUid(null)
+    }
+  }
+
+  const handleCreateTemporaryInvite = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!roomMeta || !user || creatingInvite) return
+    const parsedMax = Number.parseInt(inviteMaxUses, 10)
+    const maxUses = Number.isFinite(parsedMax) ? Math.max(1, Math.min(1000, parsedMax)) : 10
+
+    setCreatingInvite(true)
+    setError("")
+    try {
+      const { url } = await createTemporaryInvite(roomMeta.code, user, {
+        expiresInHours: inviteExpiryHours,
+        maxUses,
+      })
+      setLatestInviteUrl(url)
+      await navigator.clipboard?.writeText(url).catch(() => {})
+      showToast("Temporary invite link created & copied")
+    } catch (cause) {
+      const friendly = getFriendlyErrorMessage(cause, "Could not create temporary invite.")
+      setError(friendly)
+      showToast(friendly, "error")
+    } finally {
+      setCreatingInvite(false)
+    }
+  }
+
+  const handleCopyTempInvite = async (invId: string) => {
+    if (!roomMeta) return
+    const url = new URL(
+      `/join?invite=${encodeURIComponent(invId)}&room=${encodeURIComponent(roomMeta.code)}`,
+      window.location.origin
+    ).toString()
+    await navigator.clipboard?.writeText(url).catch(() => {})
+    showToast("Temporary invite link copied")
+  }
+
+  const handleRevokeInvite = async (invId: string) => {
+    if (!roomMeta || revokingInviteId) return
+    setRevokingInviteId(invId)
+    try {
+      await revokeInvite(roomMeta.code, invId)
+      showToast("Invite link revoked")
+    } catch (cause) {
+      const friendly = getFriendlyErrorMessage(cause, "Could not revoke invite link.")
+      showToast(friendly, "error")
+    } finally {
+      setRevokingInviteId(null)
+    }
+  }
+
   const fillCommand = (command: string) => {
     if (command === "@cohort extract") {
       openExtractModal()
@@ -585,7 +839,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
     )
   }
 
-  if (authLoading || (mode === "room" && user && roomLoading)) {
+  if (authLoading || (mode === "room" && user && user.emailVerified !== false && roomLoading)) {
     return (
       <main className="room-state-screen">
         <div className="room-loading" role="status">
@@ -595,7 +849,76 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
     )
   }
 
-  const roomReady = Boolean(mode === "room" && user && roomMeta && isJoined)
+  if (mode === "room" && user && requestRejected) {
+    return (
+      <main className="room-state-screen">
+        <section className="room-state-card">
+          <div className="room-state-icon is-declined">
+            <UserX size={24} />
+          </div>
+          <p className="eyebrow">ACCESS DECLINED</p>
+          <h1>Join request declined</h1>
+          <p>
+            The owner of room <strong>{roomMeta?.code || normalizedRouteCode}</strong> declined your
+            request to join.
+          </p>
+          <a className="primary-button" href="/join">
+            Back to join page <ArrowRight size={16} />
+          </a>
+        </section>
+      </main>
+    )
+  }
+
+  if (mode === "room" && user && roomMeta && memberRole === "pending") {
+    return (
+      <main className="room-state-screen">
+        <section className="room-state-card pending-approval-card" aria-live="polite">
+          <div className="room-state-icon pending-approval-icon">
+            <Clock size={24} />
+          </div>
+          <p className="eyebrow">
+            <span className="pending-dot" /> JOIN REQUEST PENDING
+          </p>
+          <h1>Waiting for approval</h1>
+          <p className="pending-main-message">
+            Waiting for the room owner to approve your join request
+          </p>
+          <div className="pending-room-pill">
+            <span>{roomMeta.title}</span>
+            <code>#{roomMeta.code}</code>
+          </div>
+          <p className="pending-subnote">
+            This room will unlock automatically in real time as soon as the owner approves you.
+          </p>
+          <div className="pending-actions">
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={() => void handleLeaveRoom()}
+            >
+              Cancel request
+            </button>
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={() => void handleSignOut()}
+            >
+              Sign out
+            </button>
+          </div>
+        </section>
+      </main>
+    )
+  }
+
+  const roomReady = Boolean(
+    mode === "room" &&
+      user &&
+      roomMeta &&
+      isJoined &&
+      (memberRole === "owner" || memberRole === "member")
+  )
   const currentUserName = user ? getUserDisplayName(user) : ""
 
   if (!roomReady) {
@@ -647,9 +970,13 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
           <p className="join-description">
             {mode === "room"
               ? `Sign in with Google to enter room ${normalizedRouteCode}.`
-              : user
-                ? "Create a new room or enter an 8-character invite code."
-                : "Sign in with Google to start a room or join your team."}
+              : activeInviteId && roomCode
+                ? user
+                  ? `Accept your temporary invite to join room ${roomCode}.`
+                  : `You’ve been invited to room ${roomCode}. Sign in with Google to continue.`
+                : user
+                  ? "Create a new room or enter an 8-character invite code."
+                  : "Sign in with Google to start a room or join your team."}
           </p>
 
           {!user ? (
@@ -716,6 +1043,47 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                 </div>
               )}
 
+              {mode === "join" && activeInviteId && (
+                <div
+                  className={`invite-banner ${inviteCheckStatus === "invalid" ? "is-invalid" : ""}`}
+                  role={inviteCheckStatus === "invalid" ? "alert" : undefined}
+                >
+                  <div className="invite-banner-copy">
+                    <span className="invite-banner-icon">
+                      {inviteCheckStatus === "invalid" ? <AlertCircle size={15} /> : <Link2 size={15} />}
+                    </span>
+                    <div>
+                      <strong>
+                        {inviteCheckStatus === "invalid"
+                          ? "Invite unavailable"
+                          : `Temporary invite to ${roomCode || normalizedRouteCode}`}
+                      </strong>
+                      <span>
+                        {inviteCheckStatus === "checking"
+                          ? "Checking invite validity…"
+                          : inviteCheckStatus === "invalid"
+                            ? "This invite link has expired or reached its limit"
+                            : inviteRemainingUses !== null
+                              ? `${inviteRemainingUses} use${inviteRemainingUses === 1 ? "" : "s"} left · Owner approval required`
+                              : "Owner approval required after joining"}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="invite-banner-clear"
+                    onClick={() => {
+                      setActiveInviteId("")
+                      setInviteCheckStatus("idle")
+                      setError("")
+                      setRoomCode("")
+                    }}
+                  >
+                    Use code instead
+                  </button>
+                </div>
+              )}
+
               {mode === "join" && (
                 <label>
                   Room code <span className="optional">TO JOIN AN EXISTING ROOM</span>
@@ -723,18 +1091,23 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                     <Hash size={16} />
                     <input
                       value={roomCode}
-                      onChange={(event) =>
-                        setRoomCode(
-                          event.target.value
-                            .toUpperCase()
-                            .replace(/[^A-Z0-9]/g, "")
-                            .slice(0, 8)
-                        )
-                      }
+                      onChange={(event) => {
+                        const nextVal = event.target.value
+                          .toUpperCase()
+                          .replace(/[^A-Z0-9]/g, "")
+                          .slice(0, 8)
+                        setRoomCode(nextVal)
+                        if (activeInviteId && nextVal !== normalizedRouteCode) {
+                          setActiveInviteId("")
+                          setInviteCheckStatus("idle")
+                          setError("")
+                        }
+                      }}
                       placeholder="Leave blank to create, or enter 8-char code"
                       maxLength={8}
                       autoCapitalize="characters"
                       disabled={joining}
+                      readOnly={Boolean(activeInviteId && inviteCheckStatus !== "invalid")}
                     />
                   </div>
                 </label>
@@ -765,12 +1138,20 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
               <button
                 className="primary-button join-button"
                 type="submit"
-                disabled={joining || user.emailVerified === false}
+                disabled={
+                  joining ||
+                  user.emailVerified === false ||
+                  (Boolean(activeInviteId) && (inviteCheckStatus === "invalid" || inviteCheckStatus === "checking"))
+                }
               >
                 {joining ? (
                   <>
                     <LoaderCircle className="spin" size={17} />
-                    {roomCode.trim() ? "Joining room…" : "Creating room…"}
+                    {roomCode.trim() ? "Requesting access…" : "Creating room…"}
+                  </>
+                ) : activeInviteId && roomCode.trim() ? (
+                  <>
+                    Accept invite &amp; join room <ArrowRight size={17} />
                   </>
                 ) : (
                   <>
@@ -801,6 +1182,9 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
   }
 
   const activeRoom = roomMeta as RoomMeta
+  const isOwner = memberRole === "owner" || activeRoom.ownerId === user?.uid
+  const approvedMembers = members.filter((m) => m.role !== "pending")
+  const pendingMembers = members.filter((m) => m.role === "pending")
 
   return (
     <main className="workspace-shell">
@@ -876,9 +1260,9 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
         </button>
         <div className="online-members">
           <span className="online-dot" />
-          <span>{members.filter((member) => isMemberOnline(member, nowMs)).length} online</span>
+          <span>{approvedMembers.filter((member) => isMemberOnline(member, nowMs)).length} online</span>
           <div className="mini-avatars">
-            {members.slice(0, 3).map((member) => (
+            {approvedMembers.slice(0, 3).map((member) => (
               <span
                 key={member.uid}
                 className={colors[colorIndexForId(member.uid)]}
@@ -1182,7 +1566,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                           <TaskCard
                             key={task.id}
                             task={task}
-                            members={members}
+                            members={approvedMembers}
                             menuOpen={taskMenuId === task.id}
                             updating={updatingTaskId === task.id}
                             onToggleMenu={() =>
@@ -1338,7 +1722,10 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
             <div className="members-heading">
               <div>
                 <h3>
-                  Members <span>{members.length}</span>
+                  Members <span>{approvedMembers.length}</span>
+                  {pendingMembers.length > 0 && (
+                    <span className="pending-count-pill">{pendingMembers.length} pending</span>
+                  )}
                 </h3>
               </div>
               <button
@@ -1350,9 +1737,11 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
             </div>
             <div className="member-list">
               {members.map((member) => {
-                const onlineNow = isMemberOnline(member, nowMs)
+                const isPending = member.role === "pending"
+                const onlineNow = !isPending && isMemberOnline(member, nowMs)
+                const isUpdatingMember = approvingUid === member.uid
                 return (
-                  <div className="member-row" key={member.uid}>
+                  <div className={`member-row ${isPending ? "is-pending" : ""}`} key={member.uid}>
                     <span className={`member-avatar ${colors[colorIndexForId(member.uid)]}`}>
                       {member.photoURL ? (
                         <img
@@ -1368,17 +1757,198 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                     <span className="member-name">
                       {member.name}
                       {member.uid === user?.uid && <small>you</small>}
+                      {member.role === "owner" && <small className="owner-tag">owner</small>}
                     </span>
-                    <span className={`member-status ${onlineNow ? "online" : ""}`}>
-                      {formatMemberLastSeen(member, nowMs)}
-                    </span>
+                    {isPending ? (
+                      <div className="pending-member-controls">
+                        <span className="member-pending-badge">Pending</span>
+                        {isOwner && (
+                          <div className="owner-approval-actions">
+                            <button
+                              type="button"
+                              className="approve-btn"
+                              onClick={() => void handleApproveMember(member)}
+                              disabled={isUpdatingMember}
+                              aria-label={`Approve ${member.name}`}
+                              title="Approve"
+                            >
+                              {isUpdatingMember ? <LoaderCircle className="spin" size={11} /> : <UserCheck size={12} />}
+                              <span>Approve</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="reject-btn"
+                              onClick={() => void handleRejectMember(member)}
+                              disabled={isUpdatingMember}
+                              aria-label={`Reject ${member.name}`}
+                              title="Reject"
+                            >
+                              <UserX size={12} />
+                              <span>Reject</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <span className={`member-status ${onlineNow ? "online" : ""}`}>
+                        {formatMemberLastSeen(member, nowMs)}
+                      </span>
+                    )}
                   </div>
                 )
               })}
             </div>
             <button className="invite-link" onClick={copyCode}>
-              <Users size={15} /> Invite your teammates <ArrowRight size={14} />
+              <Users size={15} /> Copy room code ({activeRoom.code}) <ArrowRight size={14} />
             </button>
+
+            {isOwner && (
+              <div className="owner-invites-section">
+                <div className="owner-invites-header">
+                  <button
+                    type="button"
+                    className="create-temp-invite-btn"
+                    onClick={() => setInvitePanelOpen(!invitePanelOpen)}
+                    aria-expanded={invitePanelOpen}
+                  >
+                    <Link2 size={13} />
+                    <span>Create temporary invite</span>
+                    <ChevronDown size={13} className={invitePanelOpen ? "rotated" : ""} />
+                  </button>
+                </div>
+
+                {invitePanelOpen && (
+                  <form className="temp-invite-form" onSubmit={handleCreateTemporaryInvite}>
+                    <div className="temp-invite-field">
+                      <span className="temp-invite-label">Expires in</span>
+                      <div className="expiry-pills" role="group" aria-label="Invite expiration">
+                        {([
+                          { hours: 24, label: "24h" },
+                          { hours: 48, label: "48h" },
+                          { hours: 168, label: "7 days" },
+                        ] as const).map((option) => (
+                          <button
+                            key={option.hours}
+                            type="button"
+                            className={inviteExpiryHours === option.hours ? "active" : ""}
+                            onClick={() => setInviteExpiryHours(option.hours)}
+                            disabled={creatingInvite}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="temp-invite-row">
+                      <label className="temp-invite-uses-label">
+                        <span>Max uses</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={1000}
+                          value={inviteMaxUses}
+                          onChange={(e) => setInviteMaxUses(e.target.value)}
+                          disabled={creatingInvite}
+                        />
+                      </label>
+                      <button
+                        type="submit"
+                        className="generate-invite-submit"
+                        disabled={creatingInvite}
+                      >
+                        {creatingInvite ? (
+                          <LoaderCircle className="spin" size={13} />
+                        ) : (
+                          <>
+                            <ShieldCheck size={13} /> Create &amp; copy
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {latestInviteUrl && (
+                      <div className="latest-invite-box">
+                        <input
+                          type="text"
+                          readOnly
+                          value={latestInviteUrl}
+                          aria-label="Latest temporary invite URL"
+                          onFocus={(e) => e.currentTarget.select()}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void navigator.clipboard?.writeText(latestInviteUrl)
+                            showToast("Temporary invite link copied")
+                          }}
+                          aria-label="Copy temporary invite link"
+                        >
+                          <Clipboard size={12} />
+                        </button>
+                      </div>
+                    )}
+                  </form>
+                )}
+
+                {invites.length > 0 && (
+                  <div className="invite-history-list">
+                    <span className="invite-history-title">
+                      Temporary invites ({invites.length})
+                    </span>
+                    {invites.slice(0, 4).map((inv) => {
+                      const expiresMs = Date.parse(inv.expiresAt)
+                      const isExpired = Number.isNaN(expiresMs) || expiresMs <= nowMs
+                      const isMaxed = inv.usedCount >= inv.maxUses
+                      const isUsable = inv.active && !isExpired && !isMaxed
+                      const statusText = !inv.active
+                        ? "Revoked"
+                        : isExpired
+                          ? "Expired"
+                          : isMaxed
+                            ? "Limit reached"
+                            : "Active"
+                      return (
+                        <div className={`invite-item-row ${isUsable ? "" : "is-inactive"}`} key={inv.id}>
+                          <div className="invite-item-meta">
+                            <span className={`invite-status-pill ${isUsable ? "is-active" : ""}`}>
+                              {statusText}
+                            </span>
+                            <span className="invite-usage">
+                              {inv.usedCount}/{inv.maxUses} uses
+                            </span>
+                          </div>
+                          <div className="invite-item-actions">
+                            {isUsable && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleCopyTempInvite(inv.id)}
+                                  title="Copy invite link"
+                                  aria-label="Copy invite link"
+                                >
+                                  <Clipboard size={12} />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="revoke-btn"
+                                  onClick={() => void handleRevokeInvite(inv.id)}
+                                  disabled={revokingInviteId === inv.id}
+                                  title="Revoke invite"
+                                  aria-label="Revoke invite"
+                                >
+                                  <Ban size={12} />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="agent-card">

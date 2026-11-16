@@ -80,6 +80,12 @@ export async function POST(req: NextRequest) {
     if (!memberData) {
       return NextResponse.json({ error: "You are not a member of this room" }, { status: 403 })
     }
+    if (memberData.role !== "owner" && memberData.role !== "member") {
+      return NextResponse.json(
+        { error: "Your join request is waiting for the room owner’s approval." },
+        { status: 403 }
+      )
+    }
 
     const [taskDocs, memberDocs] = await Promise.all([
       fsListCollection(`rooms/${roomCode}/tasks`, user.idToken),

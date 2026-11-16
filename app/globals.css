@@ -151,3 +151,88 @@
 .share-dismiss-btn:hover { color:var(--foreground); }
 @media (max-width:850px) { .share-room-card { width:auto;margin:11px 12px 0;padding:11px 12px; } }
 
+.room-state-icon.is-declined { background:#fde7e5;color:#c33b32; }
+.dark .room-state-icon.is-declined { background:#4b2725;color:#f3a39e; }
+.pending-approval-card { max-width:460px; }
+.pending-approval-icon { background:#fff3e4;color:#d97706; }
+.dark .pending-approval-icon { background:#392a17;color:#fbbf24; }
+.pending-dot { width:7px;height:7px;border-radius:50%;background:#f59e0b;display:inline-block;animation:pulse 1.1s ease-in-out infinite alternate; }
+.pending-main-message { font-size:14px !important;font-weight:650;color:var(--foreground) !important;margin-bottom:16px !important; }
+.pending-room-pill { display:inline-flex;align-items:center;gap:8px;padding:7px 12px;border:1px solid var(--border);border-radius:9px;background:var(--background);margin-bottom:14px;font-size:11px;font-weight:650;color:var(--foreground); }
+.pending-room-pill code { font:700 10px ui-monospace,SFMono-Regular,monospace;color:var(--primary);background:var(--accent);padding:2px 6px;border-radius:5px; }
+.pending-subnote { font-size:11px !important;color:var(--muted-foreground) !important;margin-bottom:20px !important; }
+.pending-actions { display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap; }
+.secondary-btn { min-height:38px;padding:0 14px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--foreground);font-size:11px;font-weight:650;transition:border-color .15s,background .15s; }
+.secondary-btn:hover { border-color:#f39757;background:var(--muted); }
+
+.invite-banner { display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid #f4d2b4;border-radius:10px;background:#fff8f1; }
+.dark .invite-banner { border-color:#5b3d24;background:#2f241b; }
+.invite-banner.is-invalid { border-color:#f0b5b1;background:#fff5f4; }
+.dark .invite-banner.is-invalid { border-color:#693a38;background:#312020; }
+.invite-banner-copy { display:flex;align-items:flex-start;gap:9px;min-width:0; }
+.invite-banner-icon { width:26px;height:26px;border-radius:7px;background:#ffe8d4;color:#d9661a;display:grid;place-items:center;flex:none;margin-top:1px; }
+.dark .invite-banner-icon { background:#46301e;color:#ffad74; }
+.invite-banner.is-invalid .invite-banner-icon { background:#fde7e5;color:#c33b32; }
+.dark .invite-banner.is-invalid .invite-banner-icon { background:#4b2725;color:#f3a39e; }
+.invite-banner-copy strong { display:block;font-size:11px;font-weight:700;color:var(--foreground); }
+.invite-banner-copy span { display:block;font-size:10px;color:var(--muted-foreground);line-height:1.4; }
+.invite-banner.is-invalid .invite-banner-copy span { color:#b83c32; }
+.dark .invite-banner.is-invalid .invite-banner-copy span { color:#f3a39e; }
+.invite-banner-clear { flex:none;border:1px solid var(--border);background:var(--card);color:var(--foreground);border-radius:6px;padding:5px 8px;font-size:9px;font-weight:650; }
+.invite-banner-clear:hover { border-color:#f39757; }
+
+.pending-count-pill { display:inline-block;margin-left:6px;padding:2px 6px;border-radius:10px;background:#fff1de;color:#c26a12;font-size:8px;font-weight:750;vertical-align:middle; }
+.dark .pending-count-pill { background:#3a2b17;color:#fbbf24; }
+.member-row { flex-wrap:wrap; }
+.member-row.is-pending { padding:6px 8px;border:1px solid #f4d8be;border-radius:8px;background:#fffaf4; }
+.dark .member-row.is-pending { border-color:#533b25;background:#2a221b; }
+.owner-tag { background:var(--accent);color:var(--accent-foreground);padding:1px 5px;border-radius:4px;font-size:7px !important;font-weight:700 !important;text-transform:uppercase;letter-spacing:.4px; }
+.pending-member-controls { display:flex;align-items:center;gap:6px;margin-left:auto; }
+.member-pending-badge { padding:2px 6px;border-radius:5px;background:#fef3c7;color:#b45309;font-size:8px;font-weight:750; }
+.dark .member-pending-badge { background:#3f2e16;color:#fcd34d; }
+.owner-approval-actions { display:flex;align-items:center;gap:4px; }
+.approve-btn,.reject-btn { display:inline-flex;align-items:center;gap:3px;min-height:22px;padding:2px 6px;border-radius:5px;border:1px solid var(--border);font-size:8px;font-weight:700;transition:background .15s,border-color .15s; }
+.approve-btn { background:#eaf5ec;border-color:#b6dec2;color:#2f7a44; }
+.approve-btn:hover:not(:disabled) { background:#d7eedd;border-color:#78be8d; }
+.reject-btn { background:#fff1ef;border-color:#f2c2be;color:#b83c32; }
+.reject-btn:hover:not(:disabled) { background:#fde1de;border-color:#e4938d; }
+.approve-btn:disabled,.reject-btn:disabled { opacity:.55;cursor:not-allowed; }
+.dark .approve-btn { background:#213527;border-color:#355940;color:#9bd0a7; }
+.dark .reject-btn { background:#3a2322;border-color:#643634;color:#f3a39e; }
+
+.owner-invites-section { margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px; }
+.owner-invites-header { display:flex;align-items:center; }
+.create-temp-invite-btn { width:100%;display:flex;align-items:center;gap:7px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--background);color:var(--foreground);font-size:10px;font-weight:650;transition:border-color .15s,background .15s; }
+.create-temp-invite-btn:hover { border-color:#f39757;background:var(--accent);color:var(--accent-foreground); }
+.create-temp-invite-btn svg:last-child { margin-left:auto;transition:transform .15s; }
+.create-temp-invite-btn svg.rotated { transform:rotate(180deg); }
+.temp-invite-form { padding:10px;border:1px solid var(--border);border-radius:9px;background:var(--background);display:flex;flex-direction:column;gap:9px; }
+.temp-invite-field { display:flex;flex-direction:column;gap:5px; }
+.temp-invite-label { font-size:9px;font-weight:700;color:var(--muted-foreground); }
+.expiry-pills { display:grid;grid-template-columns:repeat(3,1fr);gap:5px; }
+.expiry-pills button { min-height:26px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--muted-foreground);font-size:9px;font-weight:650; }
+.expiry-pills button.active { border-color:#f39757;background:var(--accent);color:var(--accent-foreground); }
+.temp-invite-row { display:flex;align-items:flex-end;gap:7px; }
+.temp-invite-uses-label { display:flex;flex-direction:column;gap:4px;flex:1;min-width:0; }
+.temp-invite-uses-label span { font-size:9px;font-weight:700;color:var(--muted-foreground); }
+.temp-invite-uses-label input { height:28px;padding:0 8px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--foreground);font-size:10px;width:100%; }
+.generate-invite-submit { height:28px;padding:0 10px;border:0;border-radius:6px;background:#f97316;color:#fff;font-size:9px;font-weight:700;display:inline-flex;align-items:center;gap:5px;white-space:nowrap; }
+.generate-invite-submit:hover:not(:disabled) { background:#e86810; }
+.generate-invite-submit:disabled { opacity:.6; }
+.latest-invite-box { display:flex;align-items:center;gap:5px;padding:4px 5px 4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--card); }
+.latest-invite-box input { flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--muted-foreground);font:500 9px ui-monospace,SFMono-Regular,monospace; }
+.latest-invite-box button { width:22px;height:22px;border:1px solid var(--border);border-radius:5px;background:var(--background);color:var(--foreground);display:grid;place-items:center; }
+.invite-history-list { display:flex;flex-direction:column;gap:5px; }
+.invite-history-title { font-size:8px;font-weight:750;letter-spacing:.7px;text-transform:uppercase;color:var(--muted-foreground); }
+.invite-item-row { display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--card); }
+.invite-item-row.is-inactive { opacity:.65; }
+.invite-item-meta { display:flex;align-items:center;gap:6px;min-width:0; }
+.invite-status-pill { padding:2px 5px;border-radius:4px;background:var(--muted);color:var(--muted-foreground);font-size:8px;font-weight:700; }
+.invite-status-pill.is-active { background:#eaf5ec;color:#3d8450; }
+.dark .invite-status-pill.is-active { background:#24342a;color:#9bd0a7; }
+.invite-usage { font-size:9px;color:var(--muted-foreground); }
+.invite-item-actions { display:flex;align-items:center;gap:4px; }
+.invite-item-actions button { width:22px;height:22px;border:1px solid var(--border);border-radius:5px;background:var(--background);color:var(--muted-foreground);display:grid;place-items:center; }
+.invite-item-actions button:hover { color:var(--foreground);border-color:#f39757; }
+.invite-item-actions button.revoke-btn:hover { color:#c33b32;border-color:#ea9f9a; }
+
