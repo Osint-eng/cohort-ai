@@ -107,6 +107,11 @@ export async function POST(req: NextRequest) {
       { status: 503 }
     )
   } catch (error) {
+    console.error("[/api/rooms] Request failed:", {
+      name: error instanceof Error ? error.name : typeof error,
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    })
     if (error instanceof RateLimitError) {
       return NextResponse.json(
         { error: error.message },
@@ -118,7 +123,12 @@ export async function POST(req: NextRequest) {
     }
     const message = error instanceof Error ? error.message : "Failed to create room"
     const lower = message.toLowerCase()
-    const status = lower.includes("token") || lower.includes("auth") ? 401 : 500
+    const status =
+      lower.includes("token") || lower.includes("auth")
+        ? 401
+        : lower.includes("permission") || lower.includes("permission_denied")
+          ? 403
+          : 500
     return NextResponse.json({ error: message }, { status })
   }
 }

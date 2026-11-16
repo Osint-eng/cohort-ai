@@ -155,6 +155,9 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
   const [taskMenuId, setTaskMenuId] = useState<string | null>(null)
   const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const [myRoomsOpen, setMyRoomsOpen] = useState(false)
+  const [recentRooms, setRecentRooms] = useState<Array<{ code: string; title: string }>>([])
+  const [shareCardDismissed, setShareCardDismissed] = useState(false)
 
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const leftRoomRef = useRef(false)
@@ -302,6 +305,23 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
     const timer = window.setTimeout(() => setToast(""), 2600)
     return () => window.clearTimeout(timer)
   }, [toast])
+
+  useEffect(() => {
+    if (!user || !roomMeta) return
+    const storageKey = `cohort-recent-rooms-${user.uid}`
+    try {
+      const raw = localStorage.getItem(storageKey)
+      const parsed = raw ? (JSON.parse(raw) as Array<{ code: string; title: string }>) : []
+      const filtered = Array.isArray(parsed)
+        ? parsed.filter((r) => r && typeof r.code === "string" && r.code !== roomMeta.code)
+        : []
+      const updated = [{ code: roomMeta.code, title: roomMeta.title }, ...filtered].slice(0, 6)
+      localStorage.setItem(storageKey, JSON.stringify(updated))
+      setRecentRooms(updated)
+    } catch {
+      setRecentRooms([{ code: roomMeta.code, title: roomMeta.title }])
+    }
+  }, [user, roomMeta])
 
   useEffect(() => {
     const el = messagesContainerRef.current
@@ -792,15 +812,55 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
           <span>cohort</span>
         </a>
         <div className="topbar-divider" />
-        <div className="room-heading">
-          <span className="room-icon">
-            <Command size={16} />
-          </span>
-          <div>
-            <strong>{activeRoom.title}</strong>
-            <span>Project room</span>
-          </div>
-          <ChevronDown size={15} className="muted-icon" />
+        <div className="room-switcher-wrap">
+          <button
+            type="button"
+            className="room-heading room-heading-btn"
+            onClick={() => setMyRoomsOpen(!myRoomsOpen)}
+            aria-haspopup="menu"
+            aria-expanded={myRoomsOpen}
+            aria-label="Switch project room"
+          >
+            <span className="room-icon">
+              <Command size={16} />
+            </span>
+            <div>
+              <strong>{activeRoom.title}</strong>
+              <span>My rooms</span>
+            </div>
+            <ChevronDown size={15} className="muted-icon" />
+          </button>
+          {myRoomsOpen && (
+            <div className="my-rooms-menu" role="menu" aria-label="My rooms">
+              <span className="my-rooms-label">Recent rooms</span>
+              {recentRooms.map((r) => (
+                <button
+                  key={r.code}
+                  type="button"
+                  role="menuitem"
+                  className={`my-rooms-item ${r.code === activeRoom.code ? "active" : ""}`}
+                  onClick={() => {
+                    setMyRoomsOpen(false)
+                    if (r.code !== activeRoom.code) {
+                      router.push(`/room/${r.code}`)
+                    }
+                  }}
+                >
+                  <span className="my-rooms-item-title">{r.title}</span>
+                  <span className="my-rooms-item-code">{r.code}</span>
+                </button>
+              ))}
+              <div className="my-rooms-divider" />
+              <a
+                href="/join"
+                className="my-rooms-action"
+                role="menuitem"
+                onClick={() => setMyRoomsOpen(false)}
+              >
+                <Plus size={14} /> Create or join another room
+              </a>
+            </div>
+          )}
         </div>
         <div className="topbar-spacer" />
         <button
@@ -888,6 +948,46 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
         <div className="reconnect-banner" role="status">
           <span className="reconnect-dot" /> Syncing room…
         </div>
+      )}
+
+      {!shareCardDismissed && tasks.length === 0 && (
+        <section className="share-room-card" aria-label="Share this room">
+          <div className="share-room-copy">
+            <span className="share-room-icon">
+              <Users size={17} />
+            </span>
+            <div>
+              <strong>Share this room with your team</strong>
+              <p>
+                Send the room code or invite link so teammates can join and collaborate in real time.
+              </p>
+            </div>
+          </div>
+          <div className="share-room-actions">
+            <button
+              type="button"
+              className="share-code-pill"
+              onClick={copyCode}
+              aria-label={`Copy room code ${activeRoom.code}`}
+            >
+              <Hash size={13} />
+              {activeRoom.code}
+              {copied ? <Check size={13} /> : <Clipboard size={12} />}
+            </button>
+            <button type="button" className="share-link-cta" onClick={copyInviteLink}>
+              <Share2 size={13} />
+              Copy invite link
+            </button>
+            <button
+              type="button"
+              className="share-dismiss-btn"
+              onClick={() => setShareCardDismissed(true)}
+              aria-label="Dismiss share card"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </section>
       )}
 
       <nav className="mobile-tabs" aria-label="Workspace sections">
