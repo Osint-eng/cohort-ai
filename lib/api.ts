@@ -47,6 +47,7 @@ export type Member = {
   photoURL: string
   role: "owner" | "member"
   online: boolean
+  lastSeenAt: string
 }
 export type RoomMeta = {
   code: string
@@ -63,6 +64,7 @@ export class RoomNotFoundError extends Error {
 }
 
 export const ROOM_CODE_REGEX = /^[A-Z0-9]{8}$/
+export const PRESENCE_TTL_MS = 2 * 60 * 1000
 
 export function normalizeRoomCode(code: string): string {
   return code.trim().toUpperCase()
@@ -71,6 +73,103 @@ export function normalizeRoomCode(code: string): string {
 export function getUserDisplayName(user: User): string {
   const emailPrefix = user.email ? user.email.split("@")[0] : ""
   return (user.displayName || emailPrefix || "Teammate").trim().slice(0, 80)
+}
+
+export function suggestDefaultRoomTitle(user: User | null): string {
+  const name = user ? getUserDisplayName(user) : "Team"
+  const firstName = name.split(/\s+/)[0] || "Team"
+  const shortDate = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+  }).format(new Date())
+  return `${firstName}’s Project – ${shortDate}`
+}
+
+export function isMemberOnline(member: Member, nowMs = Date.now()): boolean {
+  if (!member.online) return false
+  const seenMs = Date.parse(member.lastSeenAt)
+  if (Number.isNaN(seenMs)) return false
+  return nowMs - seenMs < PRESENCE_TTL_MS
+}
+
+export function formatMemberLastSeen(member: Member, nowMs = Date.now()): string {
+  if (isMemberOnline(member, nowMs)) return "online"
+  const seenMs = Date.parse(member.lastSeenAt)
+  if (Number.isNaN(seenMs)) return "away"
+  const mins = Math.max(1, Math.floor((nowMs - seenMs) / 60000))
+  if (mins < 60) return `last seen ${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `last seen ${hours}h ago`
+  return `last seen ${Math.floor(hours / 24)}d ago`
+}
+
+export function getFriendlyErrorMessage(
+  error: unknown,
+  fallback = "Something went wrong. Please try again."
+): string {
+  if (error instanceof RoomNotFoundError) {
+    return "Room not found. Check the code and try again."
+  }
+
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : ""
+  if (!raw) return fallback
+
+  // Unwrap structured FirestoreErrorInfo JSON thrown by handleFirestoreError
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw) as {
+        error?: string
+        authInfo?: { emailVerified?: boolean | null }
+      }
+      const inner = parsed.error || ""
+      const lowerInner = inner.toLowerCase()
+      if (lowerInner.includes("permission") || lowerInner.includes("permission_denied")) {
+        if (parsed.authInfo?.emailVerified === false) {
+          return "Your Google account email isn’t verified. Please sign in with a verified Google account."
+        }
+        return "You don’t have permission to update this room. Make sure you’re signed in as a room member."
+      }
+      if (lowerInner.includes("unauthenticated") || lowerInner.includes("auth")) {
+        return "Your sign-in session expired. Please sign in again."
+      }
+      if (lowerInner.includes("quota") || lowerInner.includes("resource-exhausted")) {
+        return "Daily database quota reached. Please try again later."
+      }
+      if (lowerInner.includes("offline") || lowerInner.includes("unavailable") || lowerInner.includes("network")) {
+        return "Connection issue while syncing with the room. Please check your network and retry."
+      }
+      return fallback
+    } catch {
+      return fallback
+    }
+  }
+
+  const lower = raw.toLowerCase()
+  if (lower.includes("email is not verified") || lower.includes("verified google account")) {
+    return "Your Google account email isn’t verified. Please sign in with a verified Google account."
+  }
+  if (lower.includes("missing or insufficient permissions") || lower.includes("permission-denied")) {
+    return "You don’t have permission for that action. Please check your sign-in and room membership."
+  }
+  if (lower.includes("too many") || lower.includes("reached the limit")) {
+    return raw
+  }
+  if (lower.includes("confirm replacing")) {
+    return raw
+  }
+  if (lower.includes("must be at least 3 characters")) {
+    return raw
+  }
+  if (lower.includes("gemini_api_key")) {
+    return "AI features aren’t configured on the server right now."
+  }
+  if (lower.includes("network") || lower.includes("failed to fetch")) {
+    return "Network error — please check your connection and try again."
+  }
+  if (raw.length > 180) {
+    return fallback
+  }
+  return raw
 }
 
 function makeClientId(prefix: string): string {
@@ -118,9 +217,13 @@ export async function ensureRoomMembership(rawCode: string, user: User): Promise
 
   const roomPath = `rooms/${code}`
   const roomRef = doc(db, "rooms", code)
+  const memberPath = `rooms/${code}/members/${user.uid}`
+  const memberRef = doc(db, "rooms", code, "members", user.uid)
+
   let roomSnap
+  let memberSnap
   try {
-    roomSnap = await getDoc(roomRef)
+    ;[roomSnap, memberSnap] = await Promise.all([getDoc(roomRef), getDoc(memberRef)])
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, roomPath)
   }
@@ -130,17 +233,8 @@ export async function ensureRoomMembership(rawCode: string, user: User): Promise
   }
 
   const roomData = roomSnap.data()
-  const memberPath = `rooms/${code}/members/${user.uid}`
-  const memberRef = doc(db, "rooms", code, "members", user.uid)
   const displayName = getUserDisplayName(user)
   const photoURL = (user.photoURL || "").slice(0, 500)
-
-  let memberSnap
-  try {
-    memberSnap = await getDoc(memberRef)
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, memberPath)
-  }
 
   if (!memberSnap.exists()) {
     const role = roomData.ownerId === user.uid ? "owner" : "member"
@@ -158,15 +252,27 @@ export async function ensureRoomMembership(rawCode: string, user: User): Promise
       handleFirestoreError(error, OperationType.CREATE, memberPath)
     }
   } else {
-    try {
-      await updateDoc(memberRef, {
-        displayName,
-        photoURL,
-        online: true,
-        lastSeenAt: serverTimestamp(),
-      })
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, memberPath)
+    const existing = memberSnap.data()
+    const lastSeenIso = timestampToIso(existing.lastSeenAt)
+    const lastSeenMs = Date.parse(lastSeenIso)
+    const recentlyUpdated = !Number.isNaN(lastSeenMs) && Date.now() - lastSeenMs < 30_000
+    const unchangedProfile =
+      existing.displayName === displayName &&
+      existing.photoURL === photoURL &&
+      existing.online === true
+
+    // Avoid redundant write right after server-side room creation or recent heartbeat
+    if (!(recentlyUpdated && unchangedProfile)) {
+      try {
+        await updateDoc(memberRef, {
+          displayName,
+          photoURL,
+          online: true,
+          lastSeenAt: serverTimestamp(),
+        })
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, memberPath)
+      }
     }
   }
 
@@ -253,6 +359,7 @@ export function subscribeToRoom(
           photoURL: String(data.photoURL || ""),
           role: data.role === "owner" ? "owner" : "member",
           online: Boolean(data.online),
+          lastSeenAt: timestampToIso(data.lastSeenAt),
         }
       })
       list.sort((a, b) => (a.role === b.role ? a.name.localeCompare(b.name) : a.role === "owner" ? -1 : 1))
@@ -388,7 +495,13 @@ export async function sendChatMessage(
 export async function runCohortCommand(
   rawCode: string,
   user: User,
-  payload: { messageText?: string; brief?: string; action?: "extract" }
+  payload: {
+    messageText?: string
+    brief?: string
+    action?: "extract"
+    extractMode?: "merge" | "replace"
+    replaceConfirmed?: boolean
+  }
 ): Promise<void> {
   const code = normalizeRoomCode(rawCode)
   const idToken = await user.getIdToken()

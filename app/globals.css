@@ -104,4 +104,22 @@
 .dark .quick-status-btn.done:hover:not(:disabled),.dark .quick-status-btn.done.is-active { border-color:#3a5d46;background:#24342a;color:#9bd0a7; }
 .dark .quick-status-btn.blocked:hover:not(:disabled),.dark .quick-status-btn.blocked.is-active { border-color:#693a38;background:#3a2524;color:#f1948e; }
 .modal-error { margin-top:8px; }
+.toast-message.toast-error { border-color:#f0b5b1;background:#fff6f5;color:#a9322c; }
+.dark .toast-message.toast-error { border-color:#693a38;background:#312020;color:#f3a39e; }
+.toast-check.is-error { background:#fde7e5;color:#c33b32; }
+.dark .toast-check.is-error { background:#4b2725;color:#f3a39e; }
+.extract-mode-box { margin-top:12px;padding:10px 12px;border:1px solid var(--border);border-radius:9px;background:var(--background);display:flex;flex-direction:column;gap:8px; }
+.extract-mode-title { font-size:10px;font-weight:700;color:var(--foreground); }
+.extract-mode-options { display:grid;grid-template-columns:1fr 1fr;gap:8px; }
+.extract-mode-option { display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:8px 10px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--foreground);text-align:left;transition:border-color .15s,background .15s; }
+.extract-mode-option strong { font-size:10px;font-weight:700; }
+.extract-mode-option span { font-size:9px;color:var(--muted-foreground);line-height:1.35; }
+.extract-mode-option.active { border-color:#f39757;background:#fff8f1; }
+.dark .extract-mode-option.active { border-color:#fb8735;background:#39271c; }
+.extract-confirm-check { display:flex;align-items:flex-start;gap:7px;font-size:10px;color:#b83c32;line-height:1.4;cursor:pointer;margin-top:2px; }
+.extract-confirm-check input { margin-top:2px;accent-color:#d94040; }
+.dark .extract-confirm-check { color:#f3a39e; }
+.verified-warning { padding:11px 12px;border:1px solid #f2c0b8;border-radius:9px;background:#fff4f2;color:#9f322a;font-size:11px;line-height:1.5; }
+.dark .verified-warning { border-color:#693a38;background:#312020;color:#f3a39e; }
+.verified-warning strong { display:block;margin-bottom:3px;font-size:11px; }
 

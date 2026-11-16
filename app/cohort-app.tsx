@@ -41,7 +41,10 @@ import { auth, googleProvider, validateFirestoreConnection } from "@/lib/firebas
 import {
   createRoomOnServer,
   ensureRoomMembership,
+  formatMemberLastSeen,
+  getFriendlyErrorMessage,
   getUserDisplayName,
+  isMemberOnline,
   leaveRoomMembership,
   normalizeRoomCode,
   reassignTaskFirestore,
@@ -51,6 +54,7 @@ import {
   sendChatMessage,
   setMemberPresence,
   subscribeToRoom,
+  suggestDefaultRoomTitle,
   updateTaskStatusFirestore,
   type LogEntry,
   type Member,
@@ -139,17 +143,26 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
   const [view, setView] = useState<"board" | "table">("board")
   const [extractOpen, setExtractOpen] = useState(false)
   const [extracting, setExtracting] = useState(false)
+  const [extractMode, setExtractMode] = useState<"merge" | "replace">("merge")
+  const [replaceConfirmed, setReplaceConfirmed] = useState(false)
   const [brief, setBrief] = useState("")
   const [toast, setToast] = useState("")
+  const [toastTone, setToastTone] = useState<"success" | "error">("success")
   const [joining, setJoining] = useState(false)
   const [dark, setDark] = useState(false)
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState("")
   const [taskMenuId, setTaskMenuId] = useState<string | null>(null)
   const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null)
+  const [nowMs, setNowMs] = useState(() => Date.now())
 
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const leftRoomRef = useRef(false)
+
+  const showToast = (msg: string, tone: "success" | "error" = "success") => {
+    setToastTone(tone)
+    setToast(msg)
+  }
 
   useEffect(() => {
     const savedTheme = localStorage.getItem(themeStorageKey) === "dark"
@@ -181,6 +194,12 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
     }
 
     if (!user) {
+      setIsJoined(false)
+      setRoomLoading(false)
+      return
+    }
+
+    if (user.emailVerified === false) {
       setIsJoined(false)
       setRoomLoading(false)
       return
@@ -238,20 +257,38 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
         if (cause instanceof RoomNotFoundError) {
           setRoomNotFound(true)
         } else {
-          setError(cause instanceof Error ? cause.message : "We couldn’t open that room. Please try again.")
+          setError(getFriendlyErrorMessage(cause, "We couldn’t open that room. Please try again."))
         }
         setRoomLoading(false)
       })
+
+    // Periodic heartbeat + visibility sync so presence expires cleanly via lastSeenAt TTL
+    const heartbeatId = window.setInterval(() => {
+      setNowMs(Date.now())
+      if (document.visibilityState === "visible" && !leftRoomRef.current) {
+        void setMemberPresence(normalizedRouteCode, user, true).catch(() => {})
+      }
+    }, 45_000)
+
+    const handleVisibilityChange = () => {
+      setNowMs(Date.now())
+      if (leftRoomRef.current) return
+      const visible = document.visibilityState === "visible"
+      void setMemberPresence(normalizedRouteCode, user, visible).catch(() => {})
+    }
 
     const handleBeforeUnload = () => {
       if (!leftRoomRef.current) {
         void setMemberPresence(normalizedRouteCode, user, false).catch(() => {})
       }
     }
+    document.addEventListener("visibilitychange", handleVisibilityChange)
     window.addEventListener("beforeunload", handleBeforeUnload)
 
     return () => {
       active = false
+      window.clearInterval(heartbeatId)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
       window.removeEventListener("beforeunload", handleBeforeUnload)
       if (unsubRoom) unsubRoom()
       if (!leftRoomRef.current) {
@@ -310,36 +347,56 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
 
   const enterRoom = async (event: React.FormEvent) => {
     event.preventDefault()
+    if (joining) return
     if (!user) {
       await handleGoogleSignIn()
       return
     }
+    if (user.emailVerified === false) {
+      const msg = "Please sign in with a verified Google account email to continue."
+      setError(msg)
+      showToast(msg, "error")
+      return
+    }
 
     const trimmedCode = normalizeRoomCode(roomCode)
+    const trimmedTitle = projectTitle.trim()
+
+    if (trimmedCode && !ROOM_CODE_REGEX.test(trimmedCode)) {
+      const msg = "Enter a valid 8-character room code or leave it blank to create a new room."
+      setError(msg)
+      showToast(msg, "error")
+      return
+    }
+
+    if (!trimmedCode && trimmedTitle.length > 0 && trimmedTitle.length < 3) {
+      const msg = "Project title must be at least 3 characters, or leave blank for an automatic title."
+      setError(msg)
+      showToast(msg, "error")
+      return
+    }
+
     setJoining(true)
     setError("")
 
     try {
       if (trimmedCode) {
-        if (!ROOM_CODE_REGEX.test(trimmedCode)) {
-          setError("Room not found. Enter an 8-character room code or leave it blank to create a new room.")
-          return
-        }
         await ensureRoomMembership(trimmedCode, user)
-        setToast("Welcome to your room")
+        showToast("Welcome to your room")
         router.push(`/room/${trimmedCode}`)
       } else {
-        const createdCode = await createRoomOnServer(user, projectTitle)
-        setToast("Your room is ready")
+        const finalTitle = trimmedTitle || suggestDefaultRoomTitle(user)
+        const createdCode = await createRoomOnServer(user, finalTitle)
+        showToast("Your room is ready")
         router.push(`/room/${createdCode}`)
       }
     } catch (cause) {
-      if (cause instanceof RoomNotFoundError) {
-        setError("Room not found. Check the code and try again, or create a new room.")
-      } else {
-        setError(cause instanceof Error ? cause.message : "We couldn’t open that room. Please try again.")
-      }
-    } finally {
+      const friendly =
+        cause instanceof RoomNotFoundError
+          ? "Room not found. Check the code and try again, or create a new room."
+          : getFriendlyErrorMessage(cause, "We couldn’t open that room. Please try again.")
+      setError(friendly)
+      showToast(friendly, "error")
       setJoining(false)
     }
   }
@@ -363,22 +420,49 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
     } catch (cause) {
       setCohortThinking(false)
       setMessage(text)
-      setError(cause instanceof Error ? cause.message : "Your message didn’t send. Please try again.")
+      const friendly = getFriendlyErrorMessage(cause, "Your message didn’t send. Please try again.")
+      setError(friendly)
+      showToast(friendly, "error")
     }
+  }
+
+  const openExtractModal = () => {
+    setError("")
+    setExtractMode("merge")
+    setReplaceConfirmed(false)
+    setExtractOpen(true)
   }
 
   const submitExtract = async (event: React.FormEvent) => {
     event.preventDefault()
     if (!roomMeta || !user || !brief.trim() || extracting) return
+    if (tasks.length > 0 && extractMode === "replace" && !replaceConfirmed) {
+      setError("Please confirm replacing existing tasks or switch to Merge mode.")
+      return
+    }
     setExtracting(true)
     setError("")
     try {
-      await runCohortCommand(roomMeta.code, user, { brief: brief.trim(), action: "extract" })
+      const hadTasks = tasks.length > 0
+      await runCohortCommand(roomMeta.code, user, {
+        brief: brief.trim(),
+        action: "extract",
+        extractMode: hadTasks ? extractMode : "replace",
+        replaceConfirmed: hadTasks && extractMode === "replace" ? replaceConfirmed : false,
+      })
       setBrief("")
+      setReplaceConfirmed(false)
+      setExtractMode("merge")
       setExtractOpen(false)
-      setToast("Board extracted from your brief")
+      showToast(
+        hadTasks && extractMode === "merge"
+          ? "New tasks merged into your board"
+          : "Board extracted from your brief"
+      )
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not extract tasks from your brief.")
+      const friendly = getFriendlyErrorMessage(cause, "Could not extract tasks from your brief.")
+      setError(friendly)
+      showToast(friendly, "error")
     } finally {
       setExtracting(false)
     }
@@ -391,15 +475,17 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
     try {
       await updateTaskStatusFirestore(roomMeta.code, task, status, user)
       setTaskMenuId(null)
-      setToast(
+      showToast(
         status === "done"
           ? "Task marked done"
           : status === "blocked"
             ? "Task marked blocked"
             : "Task status updated"
       )
-    } catch {
-      setError("We couldn’t update that task. Please try again.")
+    } catch (cause) {
+      const friendly = getFriendlyErrorMessage(cause, "We couldn’t update that task. Please try again.")
+      setError(friendly)
+      showToast(friendly, "error")
     } finally {
       setUpdatingTaskId(null)
     }
@@ -412,9 +498,11 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
     try {
       await reassignTaskFirestore(roomMeta.code, task, member, user)
       setTaskMenuId(null)
-      setToast(`Task reassigned to ${member.name}`)
-    } catch {
-      setError("We couldn’t reassign that task. Please try again.")
+      showToast(`Task reassigned to ${member.name}`)
+    } catch (cause) {
+      const friendly = getFriendlyErrorMessage(cause, "We couldn’t reassign that task. Please try again.")
+      setError(friendly)
+      showToast(friendly, "error")
     } finally {
       setUpdatingTaskId(null)
     }
@@ -424,14 +512,14 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
     if (!roomMeta) return
     await navigator.clipboard?.writeText(roomMeta.code)
     setCopied(true)
-    setToast("Room code copied")
+    showToast("Room code copied")
     window.setTimeout(() => setCopied(false), 1800)
   }
 
   const copyInviteLink = async () => {
     if (!roomMeta) return
     await navigator.clipboard?.writeText(new URL(`/room/${roomMeta.code}`, window.location.origin).toString())
-    setToast("Invite link copied")
+    showToast("Invite link copied")
   }
 
   const toggleTheme = () => {
@@ -452,7 +540,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
 
   const fillCommand = (command: string) => {
     if (command === "@cohort extract") {
-      setExtractOpen(true)
+      openExtractModal()
     } else {
       setMessage(command)
       document.getElementById("chat-input")?.focus()
@@ -601,6 +689,13 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                 </button>
               </div>
 
+              {user.emailVerified === false && (
+                <div className="verified-warning" role="alert">
+                  <strong>Verified Google email required</strong>
+                  Your account ({user.email || "Google user"}) does not report a verified email. Please sign in with a verified Google account to create or join rooms.
+                </div>
+              )}
+
               {mode === "join" && (
                 <label>
                   Room code <span className="optional">TO JOIN AN EXISTING ROOM</span>
@@ -619,6 +714,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                       placeholder="Leave blank to create, or enter 8-char code"
                       maxLength={8}
                       autoCapitalize="characters"
+                      disabled={joining}
                     />
                   </div>
                 </label>
@@ -626,14 +722,15 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
 
               {mode === "join" && !roomCode.trim() && (
                 <label>
-                  Project title <span className="optional">OPTIONAL</span>
+                  Project title <span className="optional">AUTO-NAMED IF BLANK</span>
                   <div className="input-wrap">
                     <FileText size={16} />
                     <input
                       value={projectTitle}
                       onChange={(event) => setProjectTitle(event.target.value)}
-                      placeholder="e.g. Campus Connect"
+                      placeholder={`e.g. ${suggestDefaultRoomTitle(user)}`}
                       maxLength={120}
+                      disabled={joining}
                     />
                   </div>
                 </label>
@@ -645,9 +742,16 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                 </p>
               )}
 
-              <button className="primary-button join-button" type="submit" disabled={joining}>
+              <button
+                className="primary-button join-button"
+                type="submit"
+                disabled={joining || user.emailVerified === false}
+              >
                 {joining ? (
-                  <LoaderCircle className="spin" size={17} />
+                  <>
+                    <LoaderCircle className="spin" size={17} />
+                    {roomCode.trim() ? "Joining room…" : "Creating room…"}
+                  </>
                 ) : (
                   <>
                     {roomCode.trim() ? "Join room" : "Create room"} <ArrowRight size={17} />
@@ -712,7 +816,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
         </button>
         <div className="online-members">
           <span className="online-dot" />
-          <span>{members.filter((member) => member.online).length} online</span>
+          <span>{members.filter((member) => isMemberOnline(member, nowMs)).length} online</span>
           <div className="mini-avatars">
             {members.slice(0, 3).map((member) => (
               <span
@@ -822,7 +926,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
             <button
               className="icon-button small-icon"
               aria-label="Extract board from brief"
-              onClick={() => setExtractOpen(true)}
+              onClick={openExtractModal}
             >
               <Sparkles size={16} />
             </button>
@@ -886,7 +990,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
             </form>
             <p className="composer-hint">
               Press <kbd>Enter</kbd> to send <span>·</span>{" "}
-              <button type="button" onClick={() => setExtractOpen(true)}>
+              <button type="button" onClick={openExtractModal}>
                 Extract brief <CircleHelp size={12} />
               </button>
             </p>
@@ -911,7 +1015,11 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                   setCohortThinking(true)
                   void sendChatMessage(roomMeta.code, user, "@cohort check-in")
                     .then(() => runCohortCommand(roomMeta.code, user, { messageText: "@cohort check-in" }))
-                    .catch((err) => setError(err instanceof Error ? err.message : "Check-in failed"))
+                    .catch((err) => {
+                      const friendly = getFriendlyErrorMessage(err, "Check-in failed. Please try again.")
+                      setError(friendly)
+                      showToast(friendly, "error")
+                    })
                     .finally(() => setCohortThinking(false))
                 }
               }}
@@ -930,7 +1038,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
             </div>
             <button
               aria-label="Extract board from brief"
-              onClick={() => setExtractOpen(true)}
+              onClick={openExtractModal}
             >
               <ArrowUpRight size={14} />
             </button>
@@ -952,7 +1060,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                 <List size={16} />
               </button>
             </div>
-            <button className="extract-button" onClick={() => setExtractOpen(true)}>
+            <button className="extract-button" onClick={openExtractModal}>
               <Plus size={14} /> Extract board
             </button>
           </div>
@@ -1053,7 +1161,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                 Paste a project brief with <code>@cohort extract</code> in chat or click below to
                 generate tasks with Gemini.
               </p>
-              <button onClick={() => setExtractOpen(true)}>
+              <button onClick={openExtractModal}>
                 <Plus size={14} /> Extract from a brief
               </button>
             </div>
@@ -1063,7 +1171,7 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
             <span>
               <span className="live-dot" /> Changes sync automatically
             </span>
-            <button onClick={() => setToast("Board synced in real time")}>
+            <button onClick={() => showToast("Board synced in real time")}>
               Live Firestore sync <ArrowDown size={13} />
             </button>
           </div>
@@ -1141,29 +1249,32 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
               </button>
             </div>
             <div className="member-list">
-              {members.map((member) => (
-                <div className="member-row" key={member.uid}>
-                  <span className={`member-avatar ${colors[colorIndexForId(member.uid)]}`}>
-                    {member.photoURL ? (
-                      <img
-                        src={member.photoURL}
-                        alt={member.name}
-                        className="avatar-img"
-                        referrerPolicy="no-referrer"
-                      />
-                    ) : (
-                      initials(member.name)
-                    )}
-                  </span>
-                  <span className="member-name">
-                    {member.name}
-                    {member.uid === user?.uid && <small>you</small>}
-                  </span>
-                  <span className={`member-status ${member.online ? "online" : ""}`}>
-                    {member.online ? "online" : "away"}
-                  </span>
-                </div>
-              ))}
+              {members.map((member) => {
+                const onlineNow = isMemberOnline(member, nowMs)
+                return (
+                  <div className="member-row" key={member.uid}>
+                    <span className={`member-avatar ${colors[colorIndexForId(member.uid)]}`}>
+                      {member.photoURL ? (
+                        <img
+                          src={member.photoURL}
+                          alt={member.name}
+                          className="avatar-img"
+                          referrerPolicy="no-referrer"
+                        />
+                      ) : (
+                        initials(member.name)
+                      )}
+                    </span>
+                    <span className="member-name">
+                      {member.name}
+                      {member.uid === user?.uid && <small>you</small>}
+                    </span>
+                    <span className={`member-status ${onlineNow ? "online" : ""}`}>
+                      {formatMemberLastSeen(member, nowMs)}
+                    </span>
+                  </div>
+                )
+              })}
             </div>
             <button className="invite-link" onClick={copyCode}>
               <Users size={15} /> Invite your teammates <ArrowRight size={14} />
@@ -1225,6 +1336,47 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                 required
                 disabled={extracting}
               />
+              {tasks.length > 0 && (
+                <div className="extract-mode-box">
+                  <span className="extract-mode-title">
+                    Board already has {tasks.length} task{tasks.length === 1 ? "" : "s"}
+                  </span>
+                  <div className="extract-mode-options" role="radiogroup" aria-label="Extraction mode">
+                    <button
+                      type="button"
+                      className={`extract-mode-option ${extractMode === "merge" ? "active" : ""}`}
+                      onClick={() => {
+                        setExtractMode("merge")
+                        setReplaceConfirmed(false)
+                      }}
+                      disabled={extracting}
+                    >
+                      <strong>Merge new tasks</strong>
+                      <span>Keep existing tasks & progress, append new ones</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`extract-mode-option ${extractMode === "replace" ? "active" : ""}`}
+                      onClick={() => setExtractMode("replace")}
+                      disabled={extracting}
+                    >
+                      <strong>Replace board</strong>
+                      <span>Clear current {tasks.length} tasks and start fresh</span>
+                    </button>
+                  </div>
+                  {extractMode === "replace" && (
+                    <label className="extract-confirm-check">
+                      <input
+                        type="checkbox"
+                        checked={replaceConfirmed}
+                        onChange={(event) => setReplaceConfirmed(event.target.checked)}
+                        disabled={extracting}
+                      />
+                      <span>I understand this will delete the {tasks.length} existing tasks and their current progress.</span>
+                    </label>
+                  )}
+                </div>
+              )}
               {error && (
                 <p className="form-error modal-error" role="alert">
                   {error}
@@ -1237,7 +1389,11 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                 <button
                   className="primary-button"
                   type="submit"
-                  disabled={!brief.trim() || extracting}
+                  disabled={
+                    !brief.trim() ||
+                    extracting ||
+                    (tasks.length > 0 && extractMode === "replace" && !replaceConfirmed)
+                  }
                 >
                   {extracting ? (
                     <>
@@ -1245,7 +1401,8 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
                     </>
                   ) : (
                     <>
-                      Build my board <ArrowRight size={16} />
+                      {tasks.length > 0 && extractMode === "merge" ? "Add to board" : "Build my board"}{" "}
+                      <ArrowRight size={16} />
                     </>
                   )}
                 </button>
@@ -1256,9 +1413,12 @@ export default function CohortApp({ mode, code = "" }: { mode: "join" | "room"; 
       )}
 
       {toast && (
-        <div className="toast-message" role="status">
-          <span className="toast-check">
-            <Check size={14} />
+        <div
+          className={`toast-message ${toastTone === "error" ? "toast-error" : ""}`}
+          role={toastTone === "error" ? "alert" : "status"}
+        >
+          <span className={`toast-check ${toastTone === "error" ? "is-error" : ""}`}>
+            {toastTone === "error" ? <AlertCircle size={14} /> : <Check size={14} />}
           </span>
           {toast}
           <button onClick={() => setToast("")} aria-label="Dismiss notification">

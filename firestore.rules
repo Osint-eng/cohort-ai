@@ -45,7 +45,7 @@ service cloud.firestore {
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
         && data.summary is string && data.summary.size() <= 600
         && isValidId(data.ownerId)
-        && data.nextTaskNumber is int && data.nextTaskNumber >= 1 && data.nextTaskNumber <= 10000
+        && data.nextTaskNumber is int && data.nextTaskNumber >= 1 && data.nextTaskNumber <= 200
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -99,6 +99,17 @@ service cloud.firestore {
         && data.task_id is string && data.task_id.size() >= 1 && data.task_id.size() <= 40
         && data.note is string && data.note.size() <= 500
         && data.createdAt is timestamp;
+    }
+
+    function isValidRateLimit(data, userId) {
+      return data.keys().hasAll(['uid', 'roomWindowStart', 'roomCount', 'cohortWindowStart', 'cohortCount', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'roomWindowStart', 'roomCount', 'cohortWindowStart', 'cohortCount', 'updatedAt'])
+        && isValidId(data.uid) && data.uid == userId && data.uid == request.auth.uid
+        && data.roomWindowStart is timestamp
+        && data.roomCount is int && data.roomCount >= 0 && data.roomCount <= 10
+        && data.cohortWindowStart is timestamp
+        && data.cohortCount is int && data.cohortCount >= 0 && data.cohortCount <= 20
+        && data.updatedAt is timestamp;
     }
 
     match /rooms/{roomCode} {
@@ -205,6 +216,39 @@ service cloud.firestore {
           && isRoomMemberAfter(roomCode);
         allow update, delete: if false;
       }
+    }
+
+    match /rateLimits/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && userId == request.auth.uid;
+      allow list: if false;
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidRateLimit(incoming(), userId)
+        && incoming().roomWindowStart == request.time
+        && incoming().cohortWindowStart == request.time
+        && incoming().updatedAt == request.time
+        && incoming().roomCount <= 1
+        && incoming().cohortCount <= 1
+        && (incoming().roomCount + incoming().cohortCount) == 1;
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidRateLimit(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['roomWindowStart', 'roomCount', 'cohortWindowStart', 'cohortCount', 'updatedAt'])
+        && (
+          (incoming().roomWindowStart == existing().roomWindowStart && incoming().roomCount == existing().roomCount)
+          || (incoming().roomWindowStart == existing().roomWindowStart && incoming().roomCount == existing().roomCount + 1 && incoming().roomCount <= 10)
+          || (request.time > existing().roomWindowStart + duration.value(600, 's') && incoming().roomWindowStart == request.time && incoming().roomCount == 1)
+        )
+        && (
+          (incoming().cohortWindowStart == existing().cohortWindowStart && incoming().cohortCount == existing().cohortCount)
+          || (incoming().cohortWindowStart == existing().cohortWindowStart && incoming().cohortCount == existing().cohortCount + 1 && incoming().cohortCount <= 20)
+          || (request.time > existing().cohortWindowStart + duration.value(600, 's') && incoming().cohortWindowStart == request.time && incoming().cohortCount == 1)
+        );
+      allow delete: if false;
     }
   }
 }

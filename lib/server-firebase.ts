@@ -31,6 +31,22 @@ function base64UrlDecode(input: string): Buffer {
   return Buffer.from(padded, "base64")
 }
 
+export class AuthVerificationError extends Error {
+  status: number
+  constructor(message: string, status = 401) {
+    super(message)
+    this.name = "AuthVerificationError"
+    this.status = status
+  }
+}
+
+export class FirestoreConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "FirestoreConflictError"
+  }
+}
+
 export interface VerifiedFirebaseUser {
   uid: string
   displayName: string
@@ -41,7 +57,7 @@ export interface VerifiedFirebaseUser {
 
 export async function verifyFirebaseIdToken(authHeader: string | null): Promise<VerifiedFirebaseUser> {
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    throw new Error("Missing Authorization Bearer token")
+    throw new AuthVerificationError("Missing Authorization Bearer token", 401)
   }
   const idToken = authHeader.slice("Bearer ".length).trim()
   const parts = idToken.split(".")
@@ -96,7 +112,10 @@ export async function verifyFirebaseIdToken(authHeader: string | null): Promise<
     throw new Error("Firebase ID token has expired")
   }
   if (payload.email_verified !== true) {
-    throw new Error("Verified Google account email is required")
+    throw new AuthVerificationError(
+      "Your Google account email is not verified. Cohort requires a Google account with a verified email address.",
+      403
+    )
   }
 
   const fallbackName = payload.email ? payload.email.split("@")[0] : "Teammate"
@@ -272,6 +291,9 @@ export async function fsCommit(writes: CommitWriteOp[], idToken: string): Promis
 
   if (!res.ok) {
     const text = await res.text()
+    if (res.status === 409 || text.includes("ALREADY_EXISTS")) {
+      throw new FirestoreConflictError(`Firestore document already exists: ${text}`)
+    }
     throw new Error(`Firestore commit failed (${res.status}): ${text}`)
   }
 }

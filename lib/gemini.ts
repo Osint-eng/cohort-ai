@@ -37,21 +37,36 @@ export async function extractBoardWithGemini(input: {
   members: Array<{ uid: string; displayName: string }>
   existingTitle: string
   todayIso: string
+  startTaskNumber?: number
+  maxTasks?: number
+  existingTasks?: Array<{ id: string; title: string; status: string }>
 }): Promise<ExtractedBoardResult> {
   const ai = getGeminiClient()
+  const startNumber = Math.max(1, input.startTaskNumber ?? 1)
+  const maxTasks = Math.max(1, Math.min(12, input.maxTasks ?? 8))
   const memberHandles =
     input.members.length > 0
       ? input.members.map((m) => `@${m.displayName.split(" ")[0]}`).join(", ")
       : "@Unassigned"
 
+  const existingContext =
+    input.existingTasks && input.existingTasks.length > 0
+      ? [
+          "Existing tasks already on the board (DO NOT duplicate these; extract only genuinely new tasks):",
+          ...input.existingTasks.map((t) => `- ${t.id}: ${t.title} [${t.status}]`),
+          "",
+        ]
+      : []
+
   const prompt = [
     `Today's date: ${input.todayIso}.`,
     `Project room title: ${input.existingTitle}.`,
     `Team members available: ${memberHandles}.`,
+    ...existingContext,
     `Project brief:\n${input.brief.trim().slice(0, 6000)}`,
     "",
-    "Extract a crisp 1-sentence project summary and 4 to 8 concrete, actionable tasks for this student team.",
-    "Use sequential IDs t1, t2, t3... and distribute suggested_owner across the available team members when reasonable.",
+    `Extract a crisp 1-sentence project summary and 1 to ${maxTasks} concrete, actionable tasks for this student team.`,
+    `Use sequential IDs starting at t${startNumber} (t${startNumber}, t${startNumber + 1}...) and distribute suggested_owner across the available team members when reasonable.`,
     "Format due_date concisely like 'Nov 20' or 'Dec 02' (use dates from the brief if mentioned, otherwise realistic milestones after today).",
     "Set status to 'todo' unless the brief explicitly says a task is already in progress, blocked, or done.",
   ].join("\n")
@@ -77,7 +92,7 @@ export async function extractBoardWithGemini(input: {
               properties: {
                 id: {
                   type: Type.STRING,
-                  description: "Sequential task ID like t1, t2, t3.",
+                  description: `Sequential task ID starting from t${startNumber}.`,
                 },
                 title: {
                   type: Type.STRING,
@@ -112,9 +127,9 @@ export async function extractBoardWithGemini(input: {
   }
 
   const rawTasks = Array.isArray(parsed.tasks) ? parsed.tasks : []
-  const tasks: ExtractedTask[] = rawTasks.slice(0, 12).map((t, index) => {
-    const id = `t${index + 1}`
-    const title = String(t.title || `Task ${index + 1}`).trim().slice(0, 200) || `Task ${index + 1}`
+  const tasks: ExtractedTask[] = rawTasks.slice(0, maxTasks).map((t, index) => {
+    const id = `t${startNumber + index}`
+    const title = String(t.title || `Task ${startNumber + index}`).trim().slice(0, 200) || `Task ${startNumber + index}`
     let owner = String(t.suggested_owner || memberHandles.split(",")[0] || "@Team").trim()
     if (!owner.startsWith("@")) owner = `@${owner}`
     owner = owner.slice(0, 80)

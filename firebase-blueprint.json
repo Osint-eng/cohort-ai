@@ -259,6 +259,44 @@
         }
       },
       "required": ["id", "actorId", "triggeredBy", "actor", "action", "task_id", "note", "createdAt"]
+    },
+    "RateLimit": {
+      "title": "RateLimit",
+      "description": "Per-user sliding-window rate limit counters for room creation and AI commands.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the rate-limited user."
+        },
+        "roomWindowStart": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the current room-creation window started."
+        },
+        "roomCount": {
+          "type": "integer",
+          "description": "Number of rooms created in the current window."
+        },
+        "cohortWindowStart": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the current AI command window started."
+        },
+        "cohortCount": {
+          "type": "integer",
+          "description": "Number of AI commands executed in the current window."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last counter update."
+        }
+      },
+      "required": ["uid", "roomWindowStart", "roomCount", "cohortWindowStart", "cohortCount", "updatedAt"]
     }
   },
   "firestore": {
@@ -281,6 +319,10 @@
     "/rooms/{roomCode}/logs/{logId}": {
       "schema": { "$ref": "#/entities/LogEntry" },
       "description": "Contribution log entries for task updates and board extractions."
+    },
+    "/rateLimits/{userId}": {
+      "schema": { "$ref": "#/entities/RateLimit" },
+      "description": "Per-user rate-limit counters keyed by Firebase Auth UID."
     }
   }
 }

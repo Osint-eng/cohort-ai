@@ -1,15 +1,18 @@
 import crypto from "node:crypto"
 import { NextRequest, NextResponse } from "next/server"
 import {
-  verifyFirebaseIdToken,
+  AuthVerificationError,
+  fsCommit,
   fsGetDocument,
   fsListCollection,
-  fsCommit,
+  verifyFirebaseIdToken,
   type CommitWriteOp,
 } from "@/lib/server-firebase"
+import { enforceUserRateLimit, RateLimitError } from "@/lib/rate-limit"
 import { extractBoardWithGemini, generateCheckInWithGemini } from "@/lib/gemini"
 
 const ROOM_CODE_REGEX = /^[A-Z0-9]{8}$/
+const MAX_TASKS_PER_ROOM = 40
 
 function makeId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`
@@ -52,11 +55,15 @@ function resolveMemberUid(
 export async function POST(req: NextRequest) {
   try {
     const user = await verifyFirebaseIdToken(req.headers.get("authorization"))
+    await enforceUserRateLimit(user.uid, user.idToken, "cohort")
+
     const body = (await req.json().catch(() => ({}))) as {
       roomCode?: unknown
       messageText?: unknown
       brief?: unknown
       action?: unknown
+      extractMode?: unknown
+      replaceConfirmed?: unknown
     }
 
     const roomCode = typeof body.roomCode === "string" ? body.roomCode.trim().toUpperCase() : ""
@@ -132,15 +139,52 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true, promptForBrief: true })
       }
 
+      const requestedMode = body.extractMode === "replace" ? "replace" : "merge"
+      const replaceConfirmed = body.replaceConfirmed === true
+      const hasExistingTasks = tasks.length > 0
+
+      if (hasExistingTasks && requestedMode === "replace" && !replaceConfirmed) {
+        return NextResponse.json(
+          {
+            error: "Please confirm replacing existing board tasks, or choose merge mode to keep current progress.",
+            requiresConfirmation: true,
+          },
+          { status: 409 }
+        )
+      }
+
+      const isReplace = !hasExistingTasks || (requestedMode === "replace" && replaceConfirmed)
+      const maxExistingNum = tasks.reduce((max, t) => {
+        const num = Number(t.id.replace(/^t/i, "")) || 0
+        return Math.max(max, num)
+      }, 0)
+      const roomNextNum = typeof roomData.nextTaskNumber === "number" ? roomData.nextTaskNumber : 1
+      const startTaskNumber = isReplace ? 1 : Math.max(roomNextNum, maxExistingNum + 1)
+
+      if (!isReplace && tasks.length >= MAX_TASKS_PER_ROOM) {
+        return NextResponse.json(
+          { error: `This board already has ${MAX_TASKS_PER_ROOM} tasks. Mark or clean up tasks, or choose Replace board.` },
+          { status: 400 }
+        )
+      }
+
+      const remainingCapacity = isReplace
+        ? 8
+        : Math.max(1, Math.min(8, MAX_TASKS_PER_ROOM - tasks.length))
+
       const extracted = await extractBoardWithGemini({
         brief: briefText,
         members,
         existingTitle: roomTitle,
         todayIso,
+        startTaskNumber,
+        maxTasks: remainingCapacity,
+        existingTasks: isReplace
+          ? undefined
+          : tasks.map((t) => ({ id: t.id, title: t.title, status: t.status })),
       })
 
-      // Delete existing tasks first if re-extracting so create rules apply cleanly
-      if (taskDocs.length > 0) {
+      if (isReplace && taskDocs.length > 0) {
         await fsCommit(
           taskDocs.map((t) => ({
             type: "delete" as const,
@@ -150,18 +194,20 @@ export async function POST(req: NextRequest) {
         )
       }
 
+      const nextTaskNumber = Math.min(200, startTaskNumber + extracted.tasks.length)
       const msgId = makeId("msg")
       const logId = makeId("log")
+      const actionVerb = isReplace && hasExistingTasks ? "replaced" : "added"
       const writes: CommitWriteOp[] = [
         {
           type: "update",
           path: `rooms/${roomCode}`,
           data: {
             summary: extracted.summary,
-            nextTaskNumber: extracted.tasks.length + 1,
+            nextTaskNumber,
           },
           serverTimestampFields: ["updatedAt"],
-          updateMaskFields: ["summary", "nextTaskNumber", "updatedAt"],
+          updateMaskFields: ["summary", "nextTaskNumber"],
         },
         ...extracted.tasks.map((task) => ({
           type: "create" as const,
@@ -186,7 +232,9 @@ export async function POST(req: NextRequest) {
             triggeredBy: user.uid,
             senderName: "cohort",
             role: "assistant",
-            text: `I extracted ${extracted.tasks.length} tasks from your brief (${extracted.tasks.map((t) => t.id).join(", ")}). Your team can update owners, mark tasks done, or flag blockers anytime.`,
+            text: isReplace
+              ? `I extracted ${extracted.tasks.length} tasks from your brief (${extracted.tasks.map((t) => t.id).join(", ")}). Your team can update owners, mark tasks done, or flag blockers anytime.`
+              : `I added ${extracted.tasks.length} new tasks to your board (${extracted.tasks.map((t) => t.id).join(", ")}) while preserving your existing ${tasks.length} tasks.`,
           },
           serverTimestampFields: ["createdAt"],
         },
@@ -198,9 +246,11 @@ export async function POST(req: NextRequest) {
             actorId: "cohort",
             triggeredBy: user.uid,
             actor: "cohort",
-            action: "created",
+            action: actionVerb === "replaced" ? "updated" : "created",
             task_id: "board",
-            note: `Extracted ${extracted.tasks.length} tasks from brief`,
+            note: isReplace
+              ? `Extracted ${extracted.tasks.length} tasks from brief`
+              : `Merged ${extracted.tasks.length} new tasks into board`,
           },
           serverTimestampFields: ["createdAt"],
         },
@@ -209,6 +259,7 @@ export async function POST(req: NextRequest) {
       await fsCommit(writes, user.idToken)
       return NextResponse.json({
         ok: true,
+        mode: isReplace ? "replace" : "merge",
         summary: extracted.summary,
         tasks: extracted.tasks,
       })
@@ -312,7 +363,7 @@ export async function POST(req: NextRequest) {
               updatedBy: user.uid,
             },
             serverTimestampFields: ["updatedAt"],
-            updateMaskFields: ["status", "updatedBy", "updatedAt"],
+            updateMaskFields: ["status", "updatedBy"],
           },
           {
             type: "create",
@@ -390,7 +441,7 @@ export async function POST(req: NextRequest) {
             triggeredBy: user.uid,
             senderName: "cohort",
             role: "assistant",
-            text: 'Commands: "@cohort extract <brief>" to build a task board, "@cohort check-in" for an overdue/blocked summary, "@cohort mark t1 complete", "@cohort mark t2 blocked because <reason>", or "@cohort list".',
+            text: 'Commands: "@cohort extract <brief>" to add tasks to your board, "@cohort check-in" for an overdue/blocked summary, "@cohort mark t1 complete", "@cohort mark t2 blocked because <reason>", or "@cohort list".',
           },
           serverTimestampFields: ["createdAt"],
         },
@@ -399,6 +450,15 @@ export async function POST(req: NextRequest) {
     )
     return NextResponse.json({ ok: true })
   } catch (error) {
+    if (error instanceof RateLimitError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: 429, headers: { "Retry-After": String(error.retryAfterSeconds) } }
+      )
+    }
+    if (error instanceof AuthVerificationError) {
+      return NextResponse.json({ error: error.message }, { status: error.status })
+    }
     const message = error instanceof Error ? error.message : "Cohort command failed"
     const lower = message.toLowerCase()
     const status =
