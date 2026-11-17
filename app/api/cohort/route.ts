@@ -52,6 +52,25 @@ function resolveMemberUid(
   return firstName ? firstName.uid : ""
 }
 
+async function setAgentStatus(
+  roomCode: string,
+  status: "watching" | "thinking",
+  idToken: string
+): Promise<void> {
+  await fsCommit(
+    [
+      {
+        type: "update",
+        path: `rooms/${roomCode}`,
+        data: { agentStatus: status },
+        serverTimestampFields: ["agentStatusAt", "updatedAt"],
+        updateMaskFields: ["agentStatus"],
+      },
+    ],
+    idToken
+  ).catch(() => {})
+}
+
 export async function POST(req: NextRequest) {
   try {
     const user = await verifyFirebaseIdToken(req.headers.get("authorization"))
@@ -104,10 +123,12 @@ export async function POST(req: NextRequest) {
       updatedAt: typeof d.data.updatedAt === "string" ? d.data.updatedAt : undefined,
     }))
 
-    const members: MemberDoc[] = memberDocs.map((d) => ({
-      uid: String(d.data.uid || d.docId),
-      displayName: String(d.data.displayName || "Teammate"),
-    }))
+    const members: MemberDoc[] = memberDocs
+      .filter((d) => d.data.role !== "pending")
+      .map((d) => ({
+        uid: String(d.data.uid || d.docId),
+        displayName: String(d.data.displayName || "Teammate"),
+      }))
 
     const messageText = typeof body.messageText === "string" ? body.messageText.trim() : ""
     const action = typeof body.action === "string" ? body.action : ""
@@ -178,17 +199,24 @@ export async function POST(req: NextRequest) {
         ? 8
         : Math.max(1, Math.min(8, MAX_TASKS_PER_ROOM - tasks.length))
 
-      const extracted = await extractBoardWithGemini({
-        brief: briefText,
-        members,
-        existingTitle: roomTitle,
-        todayIso,
-        startTaskNumber,
-        maxTasks: remainingCapacity,
-        existingTasks: isReplace
-          ? undefined
-          : tasks.map((t) => ({ id: t.id, title: t.title, status: t.status })),
-      })
+      let extracted
+      await setAgentStatus(roomCode, "thinking", user.idToken)
+      try {
+        extracted = await extractBoardWithGemini({
+          brief: briefText,
+          members,
+          existingTitle: roomTitle,
+          todayIso,
+          startTaskNumber,
+          maxTasks: remainingCapacity,
+          existingTasks: isReplace
+            ? undefined
+            : tasks.map((t) => ({ id: t.id, title: t.title, status: t.status })),
+        })
+      } catch (err) {
+        await setAgentStatus(roomCode, "watching", user.idToken)
+        throw err
+      }
 
       if (isReplace && taskDocs.length > 0) {
         await fsCommit(
@@ -211,9 +239,10 @@ export async function POST(req: NextRequest) {
           data: {
             summary: extracted.summary,
             nextTaskNumber,
+            agentStatus: "watching",
           },
-          serverTimestampFields: ["updatedAt"],
-          updateMaskFields: ["summary", "nextTaskNumber"],
+          serverTimestampFields: ["updatedAt", "agentStatusAt"],
+          updateMaskFields: ["summary", "nextTaskNumber", "agentStatus"],
         },
         ...extracted.tasks.map((task) => ({
           type: "create" as const,
@@ -221,6 +250,8 @@ export async function POST(req: NextRequest) {
           data: {
             id: task.id,
             title: task.title,
+            ...(task.description ? { description: task.description } : {}),
+            task_type: task.task_type,
             suggested_owner: task.suggested_owner,
             owner_uid: resolveMemberUid(task.suggested_owner, members),
             due_date: task.due_date,
@@ -273,16 +304,30 @@ export async function POST(req: NextRequest) {
 
     // 2. Check-in command (@cohort check-in)
     if (/@cohort\s+check-?in\b/i.test(messageText)) {
-      const checkInReply = await generateCheckInWithGemini({
-        roomTitle,
-        tasks,
-        members,
-        todayIso,
-      })
+      let checkInReply: string
+      await setAgentStatus(roomCode, "thinking", user.idToken)
+      try {
+        checkInReply = await generateCheckInWithGemini({
+          roomTitle,
+          tasks,
+          members,
+          todayIso,
+        })
+      } catch (err) {
+        await setAgentStatus(roomCode, "watching", user.idToken)
+        throw err
+      }
 
       const msgId = makeId("msg")
       await fsCommit(
         [
+          {
+            type: "update",
+            path: `rooms/${roomCode}`,
+            data: { agentStatus: "watching" },
+            serverTimestampFields: ["agentStatusAt", "updatedAt"],
+            updateMaskFields: ["agentStatus"],
+          },
           {
             type: "create",
             path: `rooms/${roomCode}/messages/${msgId}`,

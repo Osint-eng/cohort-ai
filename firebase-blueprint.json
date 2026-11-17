@@ -34,6 +34,26 @@
           "type": "integer",
           "description": "Next sequential task index."
         },
+        "agentAggressiveness": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "description": "Proactive cadence setting for @cohort in this room."
+        },
+        "agentStatus": {
+          "type": "string",
+          "enum": ["watching", "thinking"],
+          "description": "Live operational status of @cohort in this room."
+        },
+        "agentStatusAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when @cohort status last changed."
+        },
+        "lastProactiveAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when @cohort last sent a proactive message."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -165,6 +185,16 @@
           "minLength": 1,
           "maxLength": 200,
           "description": "Short actionable task title."
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Optional concise acceptance criteria or implementation notes for the task."
+        },
+        "task_type": {
+          "type": "string",
+          "enum": ["frontend", "backend", "design", "research", "general"],
+          "description": "Detected or classified discipline for the task."
         },
         "suggested_owner": {
           "type": "string",

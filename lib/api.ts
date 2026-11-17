@@ -15,11 +15,27 @@ import {
 } from "firebase/firestore"
 import type { User } from "firebase/auth"
 import { db, handleFirestoreError, OperationType } from "./firebase"
+import {
+  normalizeAggressiveness,
+  type AgentAggressiveness,
+  type AgentStatus,
+} from "./proactive-cohort"
+
+import {
+  normalizeTaskType,
+  type SandboxFiles,
+  type SandboxTemplateMode,
+  type TaskType,
+} from "./task-sandbox"
+
+export type { AgentAggressiveness, AgentStatus, TaskType }
 
 export type TaskStatus = "todo" | "in_progress" | "blocked" | "done"
 export type Task = {
   id: string
   title: string
+  description?: string
+  task_type?: TaskType
   suggested_owner: string
   owner_uid: string
   due_date: string
@@ -66,6 +82,23 @@ export type RoomMeta = {
   title: string
   summary: string
   ownerId: string
+  agentAggressiveness: AgentAggressiveness
+  agentStatus: AgentStatus
+  agentStatusAt?: string
+  lastProactiveAt?: string
+}
+
+function parseRoomMeta(code: string, data: Record<string, unknown>): RoomMeta {
+  return {
+    code,
+    title: String(data.title || "Project room"),
+    summary: String(data.summary || ""),
+    ownerId: String(data.ownerId || ""),
+    agentAggressiveness: normalizeAggressiveness(data.agentAggressiveness),
+    agentStatus: data.agentStatus === "thinking" ? "thinking" : "watching",
+    agentStatusAt: data.agentStatusAt ? timestampToIso(data.agentStatusAt) : undefined,
+    lastProactiveAt: data.lastProactiveAt ? timestampToIso(data.lastProactiveAt) : undefined,
+  }
 }
 
 export class RoomNotFoundError extends Error {
@@ -267,12 +300,7 @@ export async function ensureRoomMembership(
   const roomData = roomSnap.data()
   const displayName = getUserDisplayName(user)
   const photoURL = (user.photoURL || "").slice(0, 500)
-  const meta: RoomMeta = {
-    code,
-    title: String(roomData.title || "Project room"),
-    summary: String(roomData.summary || ""),
-    ownerId: String(roomData.ownerId || ""),
-  }
+  const meta: RoomMeta = parseRoomMeta(code, roomData)
 
   if (!memberSnap.exists()) {
     const isOwner = roomData.ownerId === user.uid
@@ -508,12 +536,7 @@ export function subscribeToPendingRoom(
         return
       }
       const d = snap.data()
-      callbacks.onRoom({
-        code,
-        title: String(d.title || "Project room"),
-        summary: String(d.summary || ""),
-        ownerId: String(d.ownerId || ""),
-      })
+      callbacks.onRoom(parseRoomMeta(code, d))
     },
     (error) => {
       try {
@@ -632,12 +655,7 @@ export function subscribeToRoom(
         return
       }
       const d = snap.data()
-      callbacks.onRoom({
-        code,
-        title: String(d.title || "Project room"),
-        summary: String(d.summary || ""),
-        ownerId: String(d.ownerId || ""),
-      })
+      callbacks.onRoom(parseRoomMeta(code, d))
     },
     (error) => {
       try {
@@ -711,6 +729,8 @@ export function subscribeToRoom(
         return {
           id: String(data.id || d.id),
           title: String(data.title || ""),
+          description: typeof data.description === "string" ? data.description : undefined,
+          task_type: normalizeTaskType(data.task_type),
           suggested_owner: String(data.suggested_owner || "@Team"),
           owner_uid: String(data.owner_uid || ""),
           due_date: String(data.due_date || "TBD"),
@@ -823,6 +843,80 @@ export async function runCohortCommand(
   const data = (await res.json().catch(() => ({}))) as { error?: string }
   if (!res.ok) {
     throw new Error(data.error || "Cohort command failed")
+  }
+}
+
+export async function updateRoomAgentAggressiveness(
+  rawCode: string,
+  level: AgentAggressiveness
+): Promise<void> {
+  const code = normalizeRoomCode(rawCode)
+  const roomPath = `rooms/${code}`
+  try {
+    await updateDoc(doc(db, "rooms", code), {
+      agentAggressiveness: level,
+      updatedAt: serverTimestamp(),
+    })
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, roomPath)
+  }
+}
+
+export async function triggerCohortPulse(
+  rawCode: string,
+  user: User
+): Promise<{ nudged: boolean; reason?: string }> {
+  const code = normalizeRoomCode(rawCode)
+  const idToken = await user.getIdToken()
+  const res = await fetch("/api/cohort/pulse", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ roomCode: code }),
+  })
+  const data = (await res.json().catch(() => ({}))) as {
+    nudged?: boolean
+    reason?: string
+    error?: string
+  }
+  if (!res.ok) {
+    throw new Error(data.error || "Cohort pulse failed")
+  }
+  return {
+    nudged: Boolean(data.nudged),
+    reason: data.reason,
+  }
+}
+
+export async function generateTaskSandboxWithCohort(
+  rawCode: string,
+  user: User,
+  taskId: string,
+  templateMode: SandboxTemplateMode
+): Promise<{ templateMode: SandboxTemplateMode; files: SandboxFiles }> {
+  const code = normalizeRoomCode(rawCode)
+  const idToken = await user.getIdToken()
+  const res = await fetch("/api/cohort/sandbox", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ roomCode: code, taskId, templateMode }),
+  })
+  const data = (await res.json().catch(() => ({}))) as {
+    templateMode?: SandboxTemplateMode
+    files?: SandboxFiles
+    error?: string
+  }
+  if (!res.ok || !data.files) {
+    throw new Error(data.error || "Could not generate starter code")
+  }
+  return {
+    templateMode: data.templateMode || templateMode,
+    files: data.files,
   }
 }
 

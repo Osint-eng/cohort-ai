@@ -50,14 +50,21 @@ service cloud.firestore {
 
     function isValidRoom(data, roomCode) {
       return data.keys().hasAll(['code', 'title', 'summary', 'ownerId', 'nextTaskNumber', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['code', 'title', 'summary', 'ownerId', 'nextTaskNumber', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'code', 'title', 'summary', 'ownerId', 'nextTaskNumber', 'createdAt', 'updatedAt',
+          'agentAggressiveness', 'agentStatus', 'agentStatusAt', 'lastProactiveAt'
+        ])
         && data.code is string && data.code == roomCode
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
         && data.summary is string && data.summary.size() <= 600
         && isValidId(data.ownerId)
         && data.nextTaskNumber is int && data.nextTaskNumber >= 1 && data.nextTaskNumber <= 200
         && data.createdAt is timestamp
-        && data.updatedAt is timestamp;
+        && data.updatedAt is timestamp
+        && (!('agentAggressiveness' in data) || data.agentAggressiveness in ['low', 'medium', 'high'])
+        && (!('agentStatus' in data) || data.agentStatus in ['watching', 'thinking'])
+        && (!('agentStatusAt' in data) || data.agentStatusAt is timestamp)
+        && (!('lastProactiveAt' in data) || data.lastProactiveAt is timestamp);
     }
 
     function isValidMember(data, memberId) {
@@ -103,9 +110,11 @@ service cloud.firestore {
 
     function isValidTask(data, taskId) {
       return data.keys().hasAll(['id', 'title', 'suggested_owner', 'owner_uid', 'due_date', 'status', 'updatedBy', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'title', 'suggested_owner', 'owner_uid', 'due_date', 'status', 'updatedBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'title', 'description', 'task_type', 'suggested_owner', 'owner_uid', 'due_date', 'status', 'updatedBy', 'createdAt', 'updatedAt'])
         && data.id is string && data.id == taskId && isValidTaskId(data.id)
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && (!('description' in data) || (data.description is string && data.description.size() <= 500))
+        && (!('task_type' in data) || data.task_type in ['frontend', 'backend', 'design', 'research', 'general'])
         && data.suggested_owner is string && data.suggested_owner.size() >= 1 && data.suggested_owner.size() <= 80
         && data.owner_uid is string && data.owner_uid.size() <= 128
         && data.due_date is string && data.due_date.size() >= 1 && data.due_date.size() <= 40
@@ -147,7 +156,9 @@ service cloud.firestore {
         && isValidRoom(incoming(), roomCode)
         && incoming().ownerId == request.auth.uid
         && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && (!('agentStatusAt' in incoming()) || incoming().agentStatusAt == request.time)
+        && (!('lastProactiveAt' in incoming()) || incoming().lastProactiveAt == request.time);
       allow update: if isSignedIn()
         && isValidRoomCode(roomCode)
         && isValidRoom(incoming(), roomCode)
@@ -157,8 +168,15 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          incoming().diff(existing()).affectedKeys().hasOnly(['summary', 'nextTaskNumber', 'updatedAt'])
-          || (incoming().diff(existing()).affectedKeys().hasOnly(['title', 'updatedAt']) && existing().ownerId == request.auth.uid)
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['summary', 'nextTaskNumber', 'agentStatus', 'agentStatusAt', 'lastProactiveAt', 'updatedAt'])
+            && (!('agentStatusAt' in incoming().diff(existing()).affectedKeys()) || incoming().agentStatusAt == request.time)
+            && (!('lastProactiveAt' in incoming().diff(existing()).affectedKeys()) || incoming().lastProactiveAt == request.time)
+          )
+          || (
+            existing().ownerId == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'agentAggressiveness', 'updatedAt'])
+          )
         );
       allow delete: if false;
 
@@ -289,7 +307,7 @@ service cloud.firestore {
           && incoming().id == existing().id
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'suggested_owner', 'owner_uid', 'due_date', 'status', 'updatedBy', 'updatedAt']);
+          && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'task_type', 'suggested_owner', 'owner_uid', 'due_date', 'status', 'updatedBy', 'updatedAt']);
         allow delete: if isSignedIn()
           && isValidRoomCode(roomCode)
           && isValidTaskId(taskId)

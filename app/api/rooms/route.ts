@@ -61,8 +61,10 @@ export async function POST(req: NextRequest) {
                 summary: "Paste your project brief with @cohort extract to generate your team’s first-draft board.",
                 ownerId: user.uid,
                 nextTaskNumber: 1,
+                agentAggressiveness: "medium",
+                agentStatus: "watching",
               },
-              serverTimestampFields: ["createdAt", "updatedAt"],
+              serverTimestampFields: ["createdAt", "updatedAt", "agentStatusAt"],
             },
             {
               type: "create",

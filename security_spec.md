@@ -17,9 +17,10 @@
    - Redeeming an invite requires `active == true`, `request.time < expiresAt`, `usedCount < maxUses`, strictly increments `usedCount` by `1`, and atomically creates the user's member document (`existsAfter`).
 6. **PII Isolation**: No email addresses, phone numbers, or sensitive user PII are stored in `/rooms`, `/members`, `/invites`, or `/rateLimits` documents.
 7. **Temporal Integrity & Immutability**:
-   - `createdAt`, `joinedAt`, `updatedAt`, `lastSeenAt` must equal `request.time` on creation/update.
+   - `createdAt`, `joinedAt`, `updatedAt`, `lastSeenAt`, `agentStatusAt`, and `lastProactiveAt` must equal `request.time` on creation/update.
    - `ownerId`, `code`, `createdAt`, `joinedAt`, `uid`, `createdBy` are immutable after creation.
-8. **Strict Schemas, Board Caps & Rate Limits**: Every document write validates exact required/allowed keys (`hasAll` + `hasOnly`), types, enums, ID patterns, string length limits, a room task sequence cap (`nextTaskNumber <= 200`), and per-user sliding-window counters at `/rateLimits/{userId}` (10 rooms / 20 AI commands per 10 minutes).
+   - `agentAggressiveness` (`low` | `medium` | `high`) may only be updated by the room owner.
+8. **Strict Schemas, Board Caps & Rate Limits**: Every document write validates exact required/allowed keys (`hasAll` + `hasOnly`), types, enums (`status`, `task_type` in `["frontend", "backend", "design", "research", "general"]`), ID patterns, string length limits (`description <= 500`), a room task sequence cap (`nextTaskNumber <= 200`), and per-user sliding-window counters at `/rateLimits/{userId}` (10 rooms / 20 AI commands per 10 minutes).
 
 ## 2. The "Dirty Dozen" Payloads (Adversarial Tests)
 1. **Unauthenticated Room Read/Write**: Unauthenticated user tries to read `/rooms/ABCD1234` -> `PERMISSION_DENIED`.

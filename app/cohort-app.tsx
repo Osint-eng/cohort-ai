@@ -32,7 +32,9 @@ import {
   MessageCircle,
   Moon,
   MoreHorizontal,
+  Play,
   Plus,
+  Scale,
   Send,
   Share2,
   ShieldCheck,
@@ -43,6 +45,9 @@ import {
   UserX,
   X,
 } from "lucide-react"
+import FairnessDashboard from "@/components/fairness-dashboard"
+import TaskSandboxModal from "@/components/task-sandbox-modal"
+import { getTaskSandboxMeta } from "@/lib/task-sandbox"
 import { auth, googleProvider, validateFirestoreConnection } from "@/lib/firebase"
 import {
   approvePendingMember,
@@ -68,8 +73,11 @@ import {
   subscribeToRoom,
   subscribeToRoomInvites,
   suggestDefaultRoomTitle,
+  triggerCohortPulse,
+  updateRoomAgentAggressiveness,
   updateTaskStatusFirestore,
   validateInviteLink,
+  type AgentAggressiveness,
   type Invite,
   type LogEntry,
   type Member,
@@ -79,6 +87,7 @@ import {
   type Task,
   type TaskStatus,
 } from "@/lib/api"
+import { PROACTIVE_THRESHOLDS } from "@/lib/proactive-cohort"
 
 const commands = [
   "@cohort help",
@@ -172,7 +181,7 @@ export default function CohortApp({
   const [message, setMessage] = useState("")
   const [cohortThinking, setCohortThinking] = useState(false)
   const [activeTab, setActiveTab] = useState("Chat")
-  const [view, setView] = useState<"board" | "table">("board")
+  const [view, setView] = useState<"board" | "table" | "fairness">("board")
   const [extractOpen, setExtractOpen] = useState(false)
   const [extracting, setExtracting] = useState(false)
   const [extractMode, setExtractMode] = useState<"merge" | "replace">("merge")
@@ -193,10 +202,12 @@ export default function CohortApp({
   const [creatingInvite, setCreatingInvite] = useState(false)
   const [revokingInviteId, setRevokingInviteId] = useState<string | null>(null)
   const [latestInviteUrl, setLatestInviteUrl] = useState("")
+  const [savingAggressiveness, setSavingAggressiveness] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [myRoomsOpen, setMyRoomsOpen] = useState(false)
   const [recentRooms, setRecentRooms] = useState<Array<{ code: string; title: string }>>([])
   const [shareCardDismissed, setShareCardDismissed] = useState(false)
+  const [sandboxTaskId, setSandboxTaskId] = useState<string | null>(null)
 
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const leftRoomRef = useRef(false)
@@ -457,6 +468,33 @@ export default function CohortApp({
       active = false
       unsubRoom()
       if (unsubInvites) unsubInvites()
+    }
+  }, [mode, normalizedRouteCode, user, isJoined, memberRole])
+
+  useEffect(() => {
+    if (
+      mode !== "room" ||
+      !user ||
+      user.emailVerified === false ||
+      !isJoined ||
+      (memberRole !== "owner" && memberRole !== "member")
+    ) {
+      return
+    }
+
+    let cancelled = false
+    const runPulse = () => {
+      if (cancelled || document.visibilityState !== "visible") return
+      void triggerCohortPulse(normalizedRouteCode, user).catch(() => {})
+    }
+
+    const initialTimer = window.setTimeout(runPulse, 10_000)
+    const intervalId = window.setInterval(runPulse, 180_000)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(initialTimer)
+      window.clearInterval(intervalId)
     }
   }, [mode, normalizedRouteCode, user, isJoined, memberRole])
 
@@ -760,6 +798,20 @@ export default function CohortApp({
       showToast(friendly, "error")
     } finally {
       setApprovingUid(null)
+    }
+  }
+
+  const handleAggressivenessChange = async (level: AgentAggressiveness) => {
+    if (!roomMeta || savingAggressiveness || roomMeta.agentAggressiveness === level) return
+    setSavingAggressiveness(true)
+    try {
+      await updateRoomAgentAggressiveness(roomMeta.code, level)
+      showToast(`@cohort proactivity set to ${PROACTIVE_THRESHOLDS[level].label}`)
+    } catch (cause) {
+      const friendly = getFriendlyErrorMessage(cause, "Could not update @cohort proactivity.")
+      showToast(friendly, "error")
+    } finally {
+      setSavingAggressiveness(false)
     }
   }
 
@@ -1185,6 +1237,13 @@ export default function CohortApp({
   const isOwner = memberRole === "owner" || activeRoom.ownerId === user?.uid
   const approvedMembers = members.filter((m) => m.role !== "pending")
   const pendingMembers = members.filter((m) => m.role === "pending")
+  const remoteThinkingMs = activeRoom.agentStatusAt ? Date.parse(activeRoom.agentStatusAt) : 0
+  const remoteAgentThinking =
+    activeRoom.agentStatus === "thinking" &&
+    !Number.isNaN(remoteThinkingMs) &&
+    nowMs - remoteThinkingMs < 30_000
+  const agentThinkingNow = cohortThinking || remoteAgentThinking
+  const sandboxTask = sandboxTaskId ? tasks.find((t) => t.id === sandboxTaskId) || null : null
 
   return (
     <main className="workspace-shell">
@@ -1258,6 +1317,14 @@ export default function CohortApp({
           <Share2 size={14} />
           <span>Copy invite link</span>
         </button>
+        <div
+          className={`agent-presence-pill ${agentThinkingNow ? "is-thinking" : ""}`}
+          title={PROACTIVE_THRESHOLDS[activeRoom.agentAggressiveness].description}
+        >
+          <span className="agent-presence-dot" />
+          <Bot size={13} />
+          <span>@cohort · {agentThinkingNow ? "thinking…" : "watching"}</span>
+        </div>
         <div className="online-members">
           <span className="online-dot" />
           <span>{approvedMembers.filter((member) => isMemberOnline(member, nowMs)).length} online</span>
@@ -1530,18 +1597,31 @@ export default function CohortApp({
           <div className="board-toolbar">
             <div className="view-toggle" role="group" aria-label="Board display mode">
               <button
+                type="button"
                 onClick={() => setView("board")}
                 className={view === "board" ? "active" : ""}
                 aria-label="Kanban view"
               >
-                <LayoutGrid size={15} />
+                <LayoutGrid size={14} />
+                <span>Board</span>
               </button>
               <button
+                type="button"
                 onClick={() => setView("table")}
                 className={view === "table" ? "active" : ""}
                 aria-label="Table view"
               >
-                <List size={16} />
+                <List size={14} />
+                <span>Table</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("fairness")}
+                className={view === "fairness" ? "active" : ""}
+                aria-label="Fairness and contribution view"
+              >
+                <Scale size={14} />
+                <span>Fairness</span>
               </button>
             </div>
             <button className="extract-button" onClick={openExtractModal}>
@@ -1549,7 +1629,17 @@ export default function CohortApp({
             </button>
           </div>
 
-          {tasks.length ? (
+          {view === "fairness" ? (
+            <FairnessDashboard
+              roomCode={activeRoom.code}
+              roomTitle={activeRoom.title}
+              members={approvedMembers}
+              tasks={tasks}
+              logs={logs}
+              nowMs={nowMs}
+              onToast={showToast}
+            />
+          ) : tasks.length ? (
             view === "board" ? (
               <div className="kanban-board">
                 {statusColumns.map((column) => {
@@ -1574,6 +1664,10 @@ export default function CohortApp({
                             }
                             onStatusChange={(status) => void changeTaskStatus(task, status)}
                             onReassign={(member) => void changeTaskOwner(task, member)}
+                            onOpenSandbox={() => {
+                              setTaskMenuId(null)
+                              setSandboxTaskId(task.id)
+                            }}
                           />
                         ))}
                         {colTasks.length === 0 && (
@@ -1598,39 +1692,55 @@ export default function CohortApp({
                     </tr>
                   </thead>
                   <tbody>
-                    {tasks.map((task) => (
-                      <tr key={task.id}>
-                        <td>
-                          <span className="task-id">{task.id}</span>
-                        </td>
-                        <td className="table-title">{task.title}</td>
-                        <td>{task.suggested_owner}</td>
-                        <td>
-                          <StatusBadge status={task.status} />
-                        </td>
-                        <td>{task.due_date}</td>
-                        <td>
-                          <div className="table-quick-actions">
-                            <button
-                              type="button"
-                              className={`quick-status-btn done ${task.status === "done" ? "is-active" : ""}`}
-                              disabled={task.status === "done" || updatingTaskId === task.id}
-                              onClick={() => void changeTaskStatus(task, "done")}
-                            >
-                              Mark done
-                            </button>
-                            <button
-                              type="button"
-                              className={`quick-status-btn blocked ${task.status === "blocked" ? "is-active" : ""}`}
-                              disabled={task.status === "blocked" || updatingTaskId === task.id}
-                              onClick={() => void changeTaskStatus(task, "blocked")}
-                            >
-                              Mark blocked
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    {tasks.map((task) => {
+                      const sandboxMeta = getTaskSandboxMeta(task)
+                      return (
+                        <tr key={task.id}>
+                          <td>
+                            <span className="task-id">{task.id}</span>
+                          </td>
+                          <td className="table-title">
+                            <div>{task.title}</div>
+                            {task.description && (
+                              <div className="table-task-desc">{task.description}</div>
+                            )}
+                          </td>
+                          <td>{task.suggested_owner}</td>
+                          <td>
+                            <StatusBadge status={task.status} />
+                          </td>
+                          <td>{task.due_date}</td>
+                          <td>
+                            <div className="table-quick-actions">
+                              <button
+                                type="button"
+                                className="quick-status-btn sandbox"
+                                onClick={() => setSandboxTaskId(task.id)}
+                              >
+                                <Play size={10} />
+                                {sandboxMeta.ctaLabel}
+                              </button>
+                              <button
+                                type="button"
+                                className={`quick-status-btn done ${task.status === "done" ? "is-active" : ""}`}
+                                disabled={task.status === "done" || updatingTaskId === task.id}
+                                onClick={() => void changeTaskStatus(task, "done")}
+                              >
+                                Mark done
+                              </button>
+                              <button
+                                type="button"
+                                className={`quick-status-btn blocked ${task.status === "blocked" ? "is-active" : ""}`}
+                                disabled={task.status === "blocked" || updatingTaskId === task.id}
+                                onClick={() => void changeTaskStatus(task, "blocked")}
+                              >
+                                Mark blocked
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1736,6 +1846,17 @@ export default function CohortApp({
               </button>
             </div>
             <div className="member-list">
+              <div className="member-row is-agent" key="__cohort_agent__">
+                <span className="member-avatar bot-avatar">
+                  <Bot size={13} />
+                </span>
+                <span className="member-name">
+                  @cohort <small className="agent-tag">AI</small>
+                </span>
+                <span className={`member-status ${agentThinkingNow ? "thinking" : "watching"}`}>
+                  {agentThinkingNow ? "thinking…" : "watching"}
+                </span>
+              </div>
               {members.map((member) => {
                 const isPending = member.role === "pending"
                 const onlineNow = !isPending && isMemberOnline(member, nowMs)
@@ -1952,14 +2073,48 @@ export default function CohortApp({
           </div>
 
           <div className="agent-card">
-            <div className="agent-icon">
-              <Bot size={17} />
+            <div className="agent-card-top">
+              <div className="agent-icon">
+                <Bot size={17} />
+              </div>
+              <div>
+                <strong>
+                  Your teammate, @cohort{" "}
+                  <span className={`agent-card-state ${agentThinkingNow ? "thinking" : ""}`}>
+                    · {agentThinkingNow ? "thinking…" : "watching"}
+                  </span>
+                </strong>
+                <p>Watches blockers &amp; deadlines automatically, or tag @cohort anytime.</p>
+              </div>
+              <span className="agent-spark">✳</span>
             </div>
-            <div>
-              <strong>Your teammate, Cohort</strong>
-              <p>Tag @cohort in chat to extract, mark, or check in.</p>
+            <div className="agent-proactivity">
+              <div className="agent-proactivity-head">
+                <span>Proactivity</span>
+                <small>{PROACTIVE_THRESHOLDS[activeRoom.agentAggressiveness].description}</small>
+              </div>
+              <div className="agent-proactivity-pills" role="group" aria-label="@cohort proactivity level">
+                {(["low", "medium", "high"] as const).map((level) => {
+                  const activeLevel = activeRoom.agentAggressiveness === level
+                  return (
+                    <button
+                      key={level}
+                      type="button"
+                      className={activeLevel ? "active" : ""}
+                      disabled={!isOwner || savingAggressiveness}
+                      onClick={() => void handleAggressivenessChange(level)}
+                      title={
+                        isOwner
+                          ? PROACTIVE_THRESHOLDS[level].description
+                          : "Only the room owner can change @cohort proactivity"
+                      }
+                    >
+                      {PROACTIVE_THRESHOLDS[level].label}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
-            <span className="agent-spark">✳</span>
           </div>
         </aside>
       </div>
@@ -2082,6 +2237,20 @@ export default function CohortApp({
         </div>
       )}
 
+      {sandboxTask && user && (
+        <TaskSandboxModal
+          task={sandboxTask}
+          roomCode={activeRoom.code}
+          roomTitle={activeRoom.title}
+          projectSummary={activeRoom.summary}
+          user={user}
+          updatingStatus={updatingTaskId === sandboxTask.id}
+          onStatusChange={(status) => void changeTaskStatus(sandboxTask, status)}
+          onClose={() => setSandboxTaskId(null)}
+          onToast={showToast}
+        />
+      )}
+
       {toast && (
         <div
           className={`toast-message ${toastTone === "error" ? "toast-error" : ""}`}
@@ -2156,6 +2325,7 @@ function TaskCard({
   onToggleMenu,
   onStatusChange,
   onReassign,
+  onOpenSandbox,
 }: {
   task: Task
   members: Member[]
@@ -2164,11 +2334,20 @@ function TaskCard({
   onToggleMenu: () => void
   onStatusChange: (status: TaskStatus) => void
   onReassign: (member: Member) => void
+  onOpenSandbox: () => void
 }) {
+  const sandboxMeta = getTaskSandboxMeta(task)
+
   return (
     <article className="task-card">
       <div className="task-card-top">
-        <span className="task-id">{task.id}</span>
+        <span className="task-card-meta-inline">
+          <span className="task-id">{task.id}</span>
+          <span aria-hidden="true">·</span>
+          <span className={`task-type-inline is-${sandboxMeta.type}`}>
+            {sandboxMeta.typeLabel}
+          </span>
+        </span>
         <button
           aria-label={`Options for ${task.title}`}
           aria-expanded={menuOpen}
@@ -2180,6 +2359,7 @@ function TaskCard({
         </button>
       </div>
       <h3>{task.title}</h3>
+      {task.description && <p className="task-card-desc">{task.description}</p>}
       <div className="task-card-bottom">
         <span className="task-owner">
           <span className="owner-avatar">
@@ -2192,6 +2372,14 @@ function TaskCard({
           {task.due_date}
         </span>
       </div>
+      <button
+        type="button"
+        className={`task-sandbox-trigger is-${sandboxMeta.type}`}
+        onClick={onOpenSandbox}
+      >
+        <Play size={11} />
+        <span>{sandboxMeta.ctaLabel}</span>
+      </button>
       <div className="task-quick-actions" role="group" aria-label={`Quick status actions for ${task.title}`}>
         <button
           type="button"
@@ -2221,6 +2409,11 @@ function TaskCard({
             if (event.key === "Escape") onToggleMenu()
           }}
         >
+          <button onClick={onOpenSandbox}>
+            <Play size={13} />
+            {sandboxMeta.ctaLabel}
+          </button>
+          <div className="task-action-divider" />
           <button onClick={() => onStatusChange("todo")} disabled={task.status === "todo" || updating}>
             To do
           </button>

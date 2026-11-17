@@ -204,10 +204,10 @@ export function fullDocumentName(relativePath: string): string {
   return `${FIRESTORE_DOC_PREFIX}/${clean}`
 }
 
-export async function fsGetDocument(
+export async function fsGetDocumentWithMeta(
   relativePath: string,
   idToken: string
-): Promise<Record<string, unknown> | null> {
+): Promise<{ data: Record<string, unknown>; updateTime?: string } | null> {
   const clean = relativePath.replace(/^\/+/, "")
   const res = await fetch(`${FIRESTORE_BASE_URL}/${clean}`, {
     headers: { Authorization: `Bearer ${idToken}` },
@@ -218,8 +218,23 @@ export async function fsGetDocument(
     const text = await res.text()
     throw new Error(`Firestore GET ${clean} failed (${res.status}): ${text}`)
   }
-  const json = (await res.json()) as { name: string; fields?: Record<string, FirestoreValue> }
-  return decodeFirestoreDoc(json).data
+  const json = (await res.json()) as {
+    name: string
+    fields?: Record<string, FirestoreValue>
+    updateTime?: string
+  }
+  return {
+    data: decodeFirestoreDoc(json).data,
+    updateTime: json.updateTime,
+  }
+}
+
+export async function fsGetDocument(
+  relativePath: string,
+  idToken: string
+): Promise<Record<string, unknown> | null> {
+  const res = await fsGetDocumentWithMeta(relativePath, idToken)
+  return res ? res.data : null
 }
 
 export async function fsListCollection(
@@ -248,6 +263,7 @@ export interface CommitWriteOp {
   data?: Record<string, unknown>
   serverTimestampFields?: string[]
   updateMaskFields?: string[]
+  ifMatchUpdateTime?: string
 }
 
 export async function fsCommit(writes: CommitWriteOp[], idToken: string): Promise<void> {
@@ -267,7 +283,9 @@ export async function fsCommit(writes: CommitWriteOp[], idToken: string): Promis
     if (op.type === "create") {
       writeObj.currentDocument = { exists: false }
     } else if (op.type === "update" && op.updateMaskFields?.length) {
-      writeObj.currentDocument = { exists: true }
+      writeObj.currentDocument = op.ifMatchUpdateTime
+        ? { updateTime: op.ifMatchUpdateTime }
+        : { exists: true }
       writeObj.updateMask = { fieldPaths: op.updateMaskFields }
     }
     if (op.serverTimestampFields?.length) {
@@ -291,8 +309,8 @@ export async function fsCommit(writes: CommitWriteOp[], idToken: string): Promis
 
   if (!res.ok) {
     const text = await res.text()
-    if (res.status === 409 || text.includes("ALREADY_EXISTS")) {
-      throw new FirestoreConflictError(`Firestore document already exists: ${text}`)
+    if (res.status === 409 || text.includes("ALREADY_EXISTS") || text.includes("FAILED_PRECONDITION")) {
+      throw new FirestoreConflictError(`Firestore precondition conflict: ${text}`)
     }
     throw new Error(`Firestore commit failed (${res.status}): ${text}`)
   }
