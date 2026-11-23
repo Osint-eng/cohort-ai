@@ -285,7 +285,7 @@ service cloud.firestore {
           && isValidId(messageId)
           && isValidMessage(incoming(), messageId)
           && incoming().createdAt == request.time
-          && isFullMemberAfter(roomCode);
+          && (isFullMember(roomCode) || isFullMemberAfter(roomCode));
         allow update, delete: if false;
       }
 
@@ -322,7 +322,7 @@ service cloud.firestore {
           && isValidId(logId)
           && isValidLogEntry(incoming(), logId)
           && incoming().createdAt == request.time
-          && isFullMemberAfter(roomCode);
+          && (isFullMember(roomCode) || isFullMemberAfter(roomCode));
         allow update, delete: if false;
       }
     }

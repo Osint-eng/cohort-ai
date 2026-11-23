@@ -6,7 +6,7 @@ import {
   type TaskType,
 } from "./task-sandbox"
 
-const MODEL = "gemini-4-hydrogen"
+const MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-4-hydrogen"
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY
