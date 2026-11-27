@@ -39,11 +39,49 @@ export const PROACTIVE_THRESHOLDS: Record<AgentAggressiveness, ProactiveThreshol
   },
 }
 
+export const MIN_PULSE_CHECK_INTERVAL_MS = 5 * 60 * 1000
+
 export function normalizeAggressiveness(value: unknown): AgentAggressiveness {
   if (value === "low" || value === "medium" || value === "high") {
     return value
   }
   return "medium"
+}
+
+export function getPulseCheckIntervalMs(aggressiveness: AgentAggressiveness): number {
+  return Math.max(MIN_PULSE_CHECK_INTERVAL_MS, PROACTIVE_THRESHOLDS[aggressiveness].cooldownMs / 8)
+}
+
+export function isWithinPulseCheckThrottle(
+  aggressiveness: AgentAggressiveness,
+  lastPulseCheckAtIso?: string,
+  nowMs = Date.now()
+): boolean {
+  if (!lastPulseCheckAtIso) return false
+  const lastCheckMs = Date.parse(lastPulseCheckAtIso)
+  if (Number.isNaN(lastCheckMs)) return false
+  return nowMs - lastCheckMs < getPulseCheckIntervalMs(aggressiveness)
+}
+
+export function estimateDailyPulseReads(params: {
+  aggressiveness: AgentAggressiveness
+  taskCount: number
+  memberCount: number
+}): {
+  intervalMinutes: number
+  checksPerDay: number
+  readsPerCheck: number
+  dailyReadsPerRoom: number
+} {
+  const intervalMinutes = getPulseCheckIntervalMs(params.aggressiveness) / 60_000
+  const checksPerDay = 1440 / intervalMinutes
+  const readsPerCheck = params.taskCount + params.memberCount + 3
+  return {
+    intervalMinutes,
+    checksPerDay,
+    readsPerCheck,
+    dailyReadsPerRoom: checksPerDay * readsPerCheck,
+  }
 }
 
 const MONTH_INDEX: Record<string, number> = {

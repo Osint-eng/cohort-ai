@@ -88,6 +88,16 @@ export async function runSecurityAudit() {
   }));
   await assertFails(deleteDoc(doc(aliceDb, 'rooms', roomCode, 'logs', 'l1')));
 
+  // 13. lastPulseCheckAt must match request.time
+  await assertSucceeds(updateDoc(doc(aliceDb, 'rooms', roomCode), {
+    lastPulseCheckAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }));
+  await assertFails(updateDoc(doc(aliceDb, 'rooms', roomCode), {
+    lastPulseCheckAt: new Date(0),
+    updatedAt: serverTimestamp(),
+  }));
+
   await testEnv.cleanup();
 }
 

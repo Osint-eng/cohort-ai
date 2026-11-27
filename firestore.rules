@@ -52,7 +52,7 @@ service cloud.firestore {
       return data.keys().hasAll(['code', 'title', 'summary', 'ownerId', 'nextTaskNumber', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
           'code', 'title', 'summary', 'ownerId', 'nextTaskNumber', 'createdAt', 'updatedAt',
-          'agentAggressiveness', 'agentStatus', 'agentStatusAt', 'lastProactiveAt'
+          'agentAggressiveness', 'agentStatus', 'agentStatusAt', 'lastProactiveAt', 'lastPulseCheckAt'
         ])
         && data.code is string && data.code == roomCode
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
@@ -64,7 +64,8 @@ service cloud.firestore {
         && (!('agentAggressiveness' in data) || data.agentAggressiveness in ['low', 'medium', 'high'])
         && (!('agentStatus' in data) || data.agentStatus in ['watching', 'thinking'])
         && (!('agentStatusAt' in data) || data.agentStatusAt is timestamp)
-        && (!('lastProactiveAt' in data) || data.lastProactiveAt is timestamp);
+        && (!('lastProactiveAt' in data) || data.lastProactiveAt is timestamp)
+        && (!('lastPulseCheckAt' in data) || data.lastPulseCheckAt is timestamp);
     }
 
     function isValidMember(data, memberId) {
@@ -159,7 +160,8 @@ service cloud.firestore {
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
         && (!('agentStatusAt' in incoming()) || incoming().agentStatusAt == request.time)
-        && (!('lastProactiveAt' in incoming()) || incoming().lastProactiveAt == request.time);
+        && (!('lastProactiveAt' in incoming()) || incoming().lastProactiveAt == request.time)
+        && (!('lastPulseCheckAt' in incoming()) || incoming().lastPulseCheckAt == request.time);
       allow update: if isSignedIn()
         && isValidRoomCode(roomCode)
         && isValidRoom(incoming(), roomCode)
@@ -170,9 +172,10 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (
           (
-            incoming().diff(existing()).affectedKeys().hasOnly(['summary', 'nextTaskNumber', 'agentStatus', 'agentStatusAt', 'lastProactiveAt', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['summary', 'nextTaskNumber', 'agentStatus', 'agentStatusAt', 'lastProactiveAt', 'lastPulseCheckAt', 'updatedAt'])
             && (!('agentStatusAt' in incoming().diff(existing()).affectedKeys()) || incoming().agentStatusAt == request.time)
             && (!('lastProactiveAt' in incoming().diff(existing()).affectedKeys()) || incoming().lastProactiveAt == request.time)
+            && (!('lastPulseCheckAt' in incoming().diff(existing()).affectedKeys()) || incoming().lastPulseCheckAt == request.time)
           )
           || (
             existing().ownerId == request.auth.uid

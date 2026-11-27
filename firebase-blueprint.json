@@ -54,6 +54,11 @@
           "format": "date-time",
           "description": "Server timestamp when @cohort last sent a proactive message."
         },
+        "lastPulseCheckAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when @cohort pulse last evaluated this room."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

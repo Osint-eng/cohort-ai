@@ -18,6 +18,7 @@ import {
 } from "@/lib/gemini"
 import {
   evaluateProactiveNudge,
+  isWithinPulseCheckThrottle,
   normalizeAggressiveness,
   PROACTIVE_THRESHOLDS,
 } from "@/lib/proactive-cohort"
@@ -52,17 +53,24 @@ export async function POST(req: NextRequest) {
 
     const roomData = roomWithMeta.data
     const aggressiveness = normalizeAggressiveness(roomData.agentAggressiveness)
+    const nowMs = Date.now()
     const lastProactiveAtIso =
       typeof roomData.lastProactiveAt === "string" ? roomData.lastProactiveAt : undefined
+    const lastPulseCheckAtIso =
+      typeof roomData.lastPulseCheckAt === "string" ? roomData.lastPulseCheckAt : undefined
 
     if (lastProactiveAtIso) {
       const lastProactiveMs = Date.parse(lastProactiveAtIso)
       if (
         !Number.isNaN(lastProactiveMs) &&
-        Date.now() - lastProactiveMs < PROACTIVE_THRESHOLDS[aggressiveness].cooldownMs
+        nowMs - lastProactiveMs < PROACTIVE_THRESHOLDS[aggressiveness].cooldownMs
       ) {
         return NextResponse.json({ ok: true, nudged: false })
       }
+    }
+
+    if (isWithinPulseCheckThrottle(aggressiveness, lastPulseCheckAtIso, nowMs)) {
+      return NextResponse.json({ ok: true, nudged: false })
     }
 
     const [taskDocs, memberDocs, messageDocs] = await Promise.all([
@@ -107,9 +115,32 @@ export async function POST(req: NextRequest) {
       roomCreatedAtIso: typeof roomData.createdAt === "string" ? roomData.createdAt : undefined,
       tasks,
       messages,
+      nowMs,
     })
 
+    const currentAgentStatus = roomData.agentStatus === "thinking" ? "thinking" : "watching"
+
     if (!evaluation.shouldNudge || !evaluation.reason || !evaluation.summaryContext) {
+      try {
+        await fsCommit(
+          [
+            {
+              type: "update",
+              path: `rooms/${roomCode}`,
+              data: { agentStatus: currentAgentStatus },
+              serverTimestampFields: ["lastPulseCheckAt", "updatedAt"],
+              updateMaskFields: ["agentStatus"],
+              ifMatchUpdateTime: roomWithMeta.updateTime,
+            },
+          ],
+          user.idToken
+        )
+      } catch (err) {
+        if (err instanceof FirestoreConflictError) {
+          return NextResponse.json({ ok: true, nudged: false })
+        }
+        throw err
+      }
       return NextResponse.json({ ok: true, nudged: false })
     }
 
@@ -143,7 +174,7 @@ export async function POST(req: NextRequest) {
             type: "update",
             path: `rooms/${roomCode}`,
             data: { agentStatus: "watching" },
-            serverTimestampFields: ["lastProactiveAt", "agentStatusAt", "updatedAt"],
+            serverTimestampFields: ["lastProactiveAt", "lastPulseCheckAt", "agentStatusAt", "updatedAt"],
             updateMaskFields: ["agentStatus"],
             ifMatchUpdateTime: roomWithMeta.updateTime,
           },

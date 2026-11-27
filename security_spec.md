@@ -17,7 +17,7 @@
    - Redeeming an invite requires `active == true`, `request.time < expiresAt`, `usedCount < maxUses`, strictly increments `usedCount` by `1`, and atomically creates the user's member document (`existsAfter`).
 6. **PII Isolation**: No email addresses, phone numbers, or sensitive user PII are stored in `/rooms`, `/members`, `/invites`, or `/rateLimits` documents.
 7. **Temporal Integrity & Immutability**:
-   - `createdAt`, `joinedAt`, `updatedAt`, `lastSeenAt`, `agentStatusAt`, and `lastProactiveAt` must equal `request.time` on creation/update.
+   - `createdAt`, `joinedAt`, `updatedAt`, `lastSeenAt`, `agentStatusAt`, `lastProactiveAt`, and `lastPulseCheckAt` must equal `request.time` on creation/update.
    - `ownerId`, `code`, `createdAt`, `joinedAt`, `uid`, `createdBy` are immutable after creation.
    - `agentAggressiveness` (`low` | `medium` | `high`) may only be updated by the room owner.
 8. **Strict Schemas, Board Caps & Rate Limits**: Every document write validates exact required/allowed keys (`hasAll` + `hasOnly`), types, enums (`status`, `task_type` in `["frontend", "backend", "design", "research", "general"]`), optional integer task `weight` (`1..3`), ID patterns, string length limits (`description <= 500`), a room task sequence cap (`nextTaskNumber <= 1000`), and per-user fixed 10-minute window counters persisted at `/rateLimits/{userId}` (10 rooms / 20 AI commands per 10 minutes, guarded by `request.time` window-reset rules and `ifMatchUpdateTime` optimistic concurrency).
