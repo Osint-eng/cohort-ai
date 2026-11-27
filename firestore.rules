@@ -48,11 +48,16 @@ service cloud.firestore {
         && getAfter(/databases/$(database)/documents/rooms/$(roomCode)/members/$(request.auth.uid)).data.role in ['owner', 'member'];
     }
 
+    function isNotBlockedOrCooldownExpired(roomCode, uid) {
+      return !exists(/databases/$(database)/documents/rooms/$(roomCode)/blocked/$(uid))
+        || request.time >= get(/databases/$(database)/documents/rooms/$(roomCode)/blocked/$(uid)).data.until;
+    }
+
     function isValidRoom(data, roomCode) {
       return data.keys().hasAll(['code', 'title', 'summary', 'ownerId', 'nextTaskNumber', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
           'code', 'title', 'summary', 'ownerId', 'nextTaskNumber', 'createdAt', 'updatedAt',
-          'agentAggressiveness', 'agentStatus', 'agentStatusAt', 'lastProactiveAt', 'lastPulseCheckAt'
+          'agentAggressiveness', 'agentStatus', 'agentStatusAt', 'lastProactiveAt', 'lastPulseCheckAt', 'nudgeState'
         ])
         && data.code is string && data.code == roomCode
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
@@ -65,7 +70,8 @@ service cloud.firestore {
         && (!('agentStatus' in data) || data.agentStatus in ['watching', 'thinking'])
         && (!('agentStatusAt' in data) || data.agentStatusAt is timestamp)
         && (!('lastProactiveAt' in data) || data.lastProactiveAt is timestamp)
-        && (!('lastPulseCheckAt' in data) || data.lastPulseCheckAt is timestamp);
+        && (!('lastPulseCheckAt' in data) || data.lastPulseCheckAt is timestamp)
+        && (!('nudgeState' in data) || (data.nudgeState is map && data.nudgeState.size() <= 40));
     }
 
     function isValidMember(data, memberId) {
@@ -150,6 +156,15 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidBlocked(data, blockedUid) {
+      return data.keys().hasAll(['uid', 'count', 'until', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'count', 'until', 'updatedAt'])
+        && isValidId(data.uid) && data.uid == blockedUid
+        && data.count is int && data.count >= 1 && data.count <= 1000
+        && data.until is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     match /rooms/{roomCode} {
       allow get: if isSignedIn() && isValidRoomCode(roomCode);
       allow list: if false;
@@ -172,7 +187,7 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (
           (
-            incoming().diff(existing()).affectedKeys().hasOnly(['summary', 'nextTaskNumber', 'agentStatus', 'agentStatusAt', 'lastProactiveAt', 'lastPulseCheckAt', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['summary', 'nextTaskNumber', 'agentStatus', 'agentStatusAt', 'lastProactiveAt', 'lastPulseCheckAt', 'nudgeState', 'updatedAt'])
             && (!('agentStatusAt' in incoming().diff(existing()).affectedKeys()) || incoming().agentStatusAt == request.time)
             && (!('lastProactiveAt' in incoming().diff(existing()).affectedKeys()) || incoming().lastProactiveAt == request.time)
             && (!('lastPulseCheckAt' in incoming().diff(existing()).affectedKeys()) || incoming().lastPulseCheckAt == request.time)
@@ -200,7 +215,12 @@ service cloud.firestore {
           && existsAfter(/databases/$(database)/documents/rooms/$(roomCode))
           && (
             (incoming().role == 'owner' && incoming().status == 'active' && getAfter(/databases/$(database)/documents/rooms/$(roomCode)).data.ownerId == request.auth.uid)
-            || (incoming().role == 'pending' && incoming().status == 'pending' && exists(/databases/$(database)/documents/rooms/$(roomCode)))
+            || (
+              incoming().role == 'pending'
+              && incoming().status == 'pending'
+              && exists(/databases/$(database)/documents/rooms/$(roomCode))
+              && isNotBlockedOrCooldownExpired(roomCode, request.auth.uid)
+            )
           );
         allow update: if isSignedIn()
           && isValidRoomCode(roomCode)
@@ -232,7 +252,10 @@ service cloud.firestore {
         allow delete: if isSignedIn()
           && isValidRoomCode(roomCode)
           && isValidId(memberId)
-          && (memberId == request.auth.uid || (isRoomOwner(roomCode) && memberId != request.auth.uid));
+          && (
+            (memberId == request.auth.uid && !isRoomOwner(roomCode))
+            || (isRoomOwner(roomCode) && memberId != request.auth.uid)
+          );
       }
 
       match /invites/{inviteId} {
@@ -279,6 +302,35 @@ service cloud.firestore {
           && isValidRoomCode(roomCode)
           && isValidId(inviteId)
           && isRoomOwner(roomCode);
+      }
+
+      match /blocked/{blockedUid} {
+        allow get: if isSignedIn()
+          && isValidRoomCode(roomCode)
+          && isValidId(blockedUid)
+          && (blockedUid == request.auth.uid || isRoomOwner(roomCode));
+        allow list: if false;
+        allow create: if isSignedIn()
+          && isValidRoomCode(roomCode)
+          && isValidId(blockedUid)
+          && isRoomOwner(roomCode)
+          && blockedUid != request.auth.uid
+          && isValidBlocked(incoming(), blockedUid)
+          && incoming().count == 1
+          && incoming().until > request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isSignedIn()
+          && isValidRoomCode(roomCode)
+          && isValidId(blockedUid)
+          && isRoomOwner(roomCode)
+          && blockedUid != request.auth.uid
+          && isValidBlocked(incoming(), blockedUid)
+          && incoming().uid == existing().uid
+          && incoming().count == existing().count + 1
+          && incoming().until > request.time
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['count', 'until', 'updatedAt']);
+        allow delete: if false;
       }
 
       match /messages/{messageId} {

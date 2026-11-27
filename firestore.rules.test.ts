@@ -98,6 +98,73 @@ export async function runSecurityAudit() {
     updatedAt: serverTimestamp(),
   }));
 
+  // 14. nudgeState must be a map with <= 40 entries
+  await assertSucceeds(updateDoc(doc(aliceDb, 'rooms', roomCode), {
+    nudgeState: { t1: { at: serverTimestamp(), n: 1 } },
+    updatedAt: serverTimestamp(),
+  }));
+  const oversizedNudgeState: Record<string, { at: ReturnType<typeof serverTimestamp>; n: number }> = {};
+  for (let i = 1; i <= 41; i++) {
+    oversizedNudgeState[`t${i}`] = { at: serverTimestamp(), n: 1 };
+  }
+  await assertFails(updateDoc(doc(aliceDb, 'rooms', roomCode), {
+    nudgeState: oversizedNudgeState,
+    updatedAt: serverTimestamp(),
+  }));
+  await assertFails(updateDoc(doc(aliceDb, 'rooms', roomCode), {
+    nudgeState: 'not-a-map',
+    updatedAt: serverTimestamp(),
+  }));
+
+  // 15. Room owner cannot delete their own member document (cannot orphan room)
+  await assertFails(deleteDoc(doc(aliceDb, 'rooms', roomCode, 'members', 'alice_uid')));
+
+  // 16. Rejected users cannot re-request before blocked.until, and succeed after blocked.until
+  await assertSucceeds(setDoc(doc(aliceDb, 'rooms', roomCode, 'blocked', 'bob_uid'), {
+    uid: 'bob_uid',
+    count: 1,
+    until: new Date(Date.now() + 15 * 60_000),
+    updatedAt: serverTimestamp(),
+  }));
+  // User can read their own blocked doc, non-owner cannot write it
+  await assertSucceeds(getDoc(doc(bobDb, 'rooms', roomCode, 'blocked', 'bob_uid')));
+  await assertFails(setDoc(doc(bobDb, 'rooms', roomCode, 'blocked', 'bob_uid'), {
+    uid: 'bob_uid',
+    count: 1,
+    until: new Date(Date.now() - 1_000),
+    updatedAt: serverTimestamp(),
+  }));
+  // Re-requesting before blocked.until fails
+  await assertFails(setDoc(doc(bobDb, 'rooms', roomCode, 'members', 'bob_uid'), {
+    uid: 'bob_uid',
+    displayName: 'Bob',
+    photoURL: '',
+    role: 'pending',
+    status: 'pending',
+    online: true,
+    joinedAt: serverTimestamp(),
+    lastSeenAt: serverTimestamp(),
+  }));
+  // After blocked.until passes, pending re-request succeeds
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'rooms', roomCode, 'blocked', 'bob_uid'), {
+      uid: 'bob_uid',
+      count: 1,
+      until: new Date(Date.now() - 60_000),
+      updatedAt: new Date(Date.now() - 16 * 60_000),
+    });
+  });
+  await assertSucceeds(setDoc(doc(bobDb, 'rooms', roomCode, 'members', 'bob_uid'), {
+    uid: 'bob_uid',
+    displayName: 'Bob',
+    photoURL: '',
+    role: 'pending',
+    status: 'pending',
+    online: true,
+    joinedAt: serverTimestamp(),
+    lastSeenAt: serverTimestamp(),
+  }));
+
   await testEnv.cleanup();
 }
 

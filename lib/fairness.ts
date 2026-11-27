@@ -58,6 +58,17 @@ export type FairnessReport = {
 
 const OTHER_ACTION_POINTS = 0.5
 const MAX_OTHER_ACTION_POINTS = 2
+export const RECENCY_HALF_LIFE_DAYS = 7
+
+export function computeDecayedCompletionPoints(weight: number, ageDays: number): number {
+  const safeAgeDays = Math.max(0, ageDays)
+  return 3 * weight * 0.5 ** (safeAgeDays / RECENCY_HALF_LIFE_DAYS)
+}
+
+export function computeDecayedStartPoints(ageDays: number): number {
+  const safeAgeDays = Math.max(0, ageDays)
+  return 1 * 0.5 ** (safeAgeDays / RECENCY_HALF_LIFE_DAYS)
+}
 
 function matchTaskOwnerUid(task: Task, members: Member[]): string {
   if (task.owner_uid && members.some((m) => m.uid === task.owner_uid)) {
@@ -130,7 +141,6 @@ export function computeFairnessReport(input: {
       if (a.ms === null && b.ms !== null) return 1
       return a.index - b.index
     })
-    .map((entry) => entry.log)
 
   const firstCompletedTaskIds = new Set<string>()
   const firstStartedTaskIds = new Set<string>()
@@ -147,9 +157,10 @@ export function computeFairnessReport(input: {
     logsByUid.set(log.actorId, list)
   }
 
-  for (const log of chronologicalLogs) {
+  for (const { log, ms } of chronologicalLogs) {
     const action = log.action.trim().toLowerCase()
     const taskKey = log.task_id || log.id
+    const ageDays = ms !== null ? Math.max(0, (nowMs - ms) / 86_400_000) : 0
 
     if (action === "completed") {
       if (!firstCompletedTaskIds.has(taskKey)) {
@@ -157,7 +168,8 @@ export function computeFairnessReport(input: {
         const weight = taskWeightById.get(log.task_id) ?? 1
         completionPointsByUid.set(
           log.actorId,
-          (completionPointsByUid.get(log.actorId) || 0) + 3 * weight
+          (completionPointsByUid.get(log.actorId) || 0) +
+            computeDecayedCompletionPoints(weight, ageDays)
         )
       }
       continue
@@ -166,7 +178,10 @@ export function computeFairnessReport(input: {
     if (action === "started") {
       if (!firstStartedTaskIds.has(taskKey)) {
         firstStartedTaskIds.add(taskKey)
-        startPointsByUid.set(log.actorId, (startPointsByUid.get(log.actorId) || 0) + 1)
+        startPointsByUid.set(
+          log.actorId,
+          (startPointsByUid.get(log.actorId) || 0) + computeDecayedStartPoints(ageDays)
+        )
       }
       continue
     }
@@ -230,7 +245,7 @@ export function computeFairnessReport(input: {
       MAX_OTHER_ACTION_POINTS,
       otherPointsByUid.get(member.uid) || 0
     )
-    const points = Number((completionPoints + startPoints + otherPoints).toFixed(1))
+    const points = Number((completionPoints + startPoints + otherPoints).toFixed(2))
 
     const lastSeenMs = parseIsoMs(member.lastSeenAt)
     const activityRefMs = latestLogMs ?? lastSeenMs
@@ -362,11 +377,14 @@ export function computeFairnessReport(input: {
   }
 }
 
+export function escapeCsvCell(val: string | number): string {
+  const safe =
+    typeof val === "string" && /^[=+\-@\t\r]/.test(val) ? `'${val}` : String(val)
+  return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe
+}
+
 export function buildFairnessCsv(roomCode: string, roomTitle: string, report: FairnessReport): string {
-  const escapeCsv = (val: string | number) => {
-    const s = String(val)
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-  }
+  const escapeCsv = escapeCsvCell
 
   const header = [
     "Room Code",

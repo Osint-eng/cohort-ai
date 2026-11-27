@@ -1,10 +1,12 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import {
+  getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from "firebase/auth"
@@ -59,16 +61,25 @@ import {
   deleteTaskFirestore,
   ensureRoomMembership,
   formatMemberLastSeen,
+  formatRetryAfterTime,
   formatTaskDueDateDisplay,
+  getBlockedUntilIso,
   getFriendlyErrorMessage,
+  getRecentRoomsStorageKey,
   getTodayDateInputValue,
   getUserDisplayName,
   InviteExpiredOrLimitError,
   isMemberOnline,
   leaveRoomMembership,
+  loadOlderMessages,
+  mergeFairnessLogs,
+  mergeLiveMessages,
+  mergeOlderMessages,
   normalizeRoomCode,
   normalizeTaskWeight,
   reassignTaskFirestore,
+  RECENT_ROOMS_LIMIT,
+  RejectedCooldownError,
   rejectPendingMember,
   revokeInvite,
   ROOM_CODE_REGEX,
@@ -76,6 +87,7 @@ import {
   runCohortCommand,
   sendChatMessage,
   setMemberPresence,
+  shouldFallbackToRedirectSignIn,
   subscribeToPendingRoom,
   subscribeToRoom,
   subscribeToRoomInvites,
@@ -85,6 +97,7 @@ import {
   updateRoomAgentAggressiveness,
   updateTaskFieldsFirestore,
   updateTaskStatusFirestore,
+  upsertRecentRoom,
   validateInviteLink,
   type AgentAggressiveness,
   type Invite,
@@ -92,6 +105,8 @@ import {
   type Member,
   type MemberRole,
   type Message,
+  type MessageCursor,
+  type RecentRoomEntry,
   type RoomMeta,
   type Task,
   type TaskStatus,
@@ -171,10 +186,14 @@ export default function CohortApp({
   const [roomMeta, setRoomMeta] = useState<RoomMeta | null>(null)
   const [memberRole, setMemberRole] = useState<MemberRole | null>(null)
   const [requestRejected, setRequestRejected] = useState(false)
+  const [rejectedUntilIso, setRejectedUntilIso] = useState<string | null>(null)
   const [members, setMembers] = useState<Member[]>([])
   const [messages, setMessages] = useState<Message[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [logs, setLogs] = useState<LogEntry[]>([])
+  const [fairnessLogs, setFairnessLogs] = useState<LogEntry[]>([])
+  const [hasMoreMessages, setHasMoreMessages] = useState(false)
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false)
   const [invites, setInvites] = useState<Invite[]>([])
 
   const [activeInviteId, setActiveInviteId] = useState(() => inviteId.trim())
@@ -231,6 +250,9 @@ export default function CohortApp({
   const [taskModalError, setTaskModalError] = useState("")
 
   const messagesContainerRef = useRef<HTMLDivElement>(null)
+  const olderMessageCursorRef = useRef<MessageCursor | null>(null)
+  const hasLoadedOlderRef = useRef(false)
+  const skipAutoScrollRef = useRef(false)
   const leftRoomRef = useRef(false)
   const rejectedRef = useRef(false)
 
@@ -247,11 +269,22 @@ export default function CohortApp({
   }, [])
 
   useEffect(() => {
+    let cancelled = false
+    getRedirectResult(auth).catch((cause) => {
+      if (cancelled) return
+      const code = (cause as { code?: string })?.code || ""
+      if (code && code !== "auth/popup-closed-by-user" && code !== "auth/cancelled-popup-request") {
+        setError("Google sign-in didn’t complete. Please try again.")
+      }
+    })
     const unsub = onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser)
       setAuthLoading(false)
     })
-    return () => unsub()
+    return () => {
+      cancelled = true
+      unsub()
+    }
   }, [])
 
   useEffect(() => {
@@ -333,9 +366,17 @@ export default function CohortApp({
     let active = true
     leftRoomRef.current = false
     rejectedRef.current = false
+    olderMessageCursorRef.current = null
+    hasLoadedOlderRef.current = false
+    skipAutoScrollRef.current = false
+    setMessages([])
+    setLogs([])
+    setFairnessLogs([])
+    setHasMoreMessages(false)
     setRoomLoading(true)
     setRoomNotFound(false)
     setRequestRejected(false)
+    setRejectedUntilIso(null)
     setMemberRole(null)
     setError("")
 
@@ -351,6 +392,10 @@ export default function CohortApp({
         if (!active) return
         if (cause instanceof RoomNotFoundError) {
           setRoomNotFound(true)
+        } else if (cause instanceof RejectedCooldownError) {
+          rejectedRef.current = true
+          setRejectedUntilIso(cause.untilIso)
+          setRequestRejected(true)
         } else {
           setError(getFriendlyErrorMessage(cause, "We couldn’t open that room. Please try again."))
         }
@@ -417,6 +462,11 @@ export default function CohortApp({
           setRequestRejected(true)
           setIsJoined(false)
           setMemberRole(null)
+          void getBlockedUntilIso(normalizedRouteCode, user.uid)
+            .then((untilIso) => {
+              if (active && untilIso) setRejectedUntilIso(untilIso)
+            })
+            .catch(() => {})
         },
         onNotFound: () => {
           if (!active) return
@@ -452,7 +502,14 @@ export default function CohortApp({
       },
       onMessages: (nextMessages) => {
         if (!active) return
-        setMessages(nextMessages)
+        setMessages((prev) => mergeLiveMessages(prev, nextMessages))
+      },
+      onMessagesMeta: (meta) => {
+        if (!active) return
+        if (!hasLoadedOlderRef.current) {
+          olderMessageCursorRef.current = meta.cursor
+          setHasMoreMessages(meta.hasMore)
+        }
       },
       onTasks: (nextTasks) => {
         if (!active) return
@@ -461,6 +518,10 @@ export default function CohortApp({
       onLogs: (nextLogs) => {
         if (!active) return
         setLogs(nextLogs)
+      },
+      onFairnessLogs: (nextFairnessLogs) => {
+        if (!active) return
+        setFairnessLogs(nextFairnessLogs)
       },
       onNotFound: () => {
         if (!active) return
@@ -526,27 +587,66 @@ export default function CohortApp({
   }, [toast])
 
   useEffect(() => {
-    if (!user || !roomMeta) return
-    const storageKey = `cohort-recent-rooms-${user.uid}`
+    if (!user) {
+      setRecentRooms([])
+      return
+    }
+    const storageKey = getRecentRoomsStorageKey(user.uid)
     try {
       const raw = localStorage.getItem(storageKey)
-      const parsed = raw ? (JSON.parse(raw) as Array<{ code: string; title: string }>) : []
-      const filtered = Array.isArray(parsed)
-        ? parsed.filter((r) => r && typeof r.code === "string" && r.code !== roomMeta.code)
+      const parsed = raw ? (JSON.parse(raw) as RecentRoomEntry[]) : []
+      const valid = Array.isArray(parsed)
+        ? parsed
+            .filter(
+              (r): r is RecentRoomEntry =>
+                Boolean(r && typeof r.code === "string" && typeof r.title === "string")
+            )
+            .slice(0, RECENT_ROOMS_LIMIT)
         : []
-      const updated = [{ code: roomMeta.code, title: roomMeta.title }, ...filtered].slice(0, 6)
+      if (!roomMeta) {
+        setRecentRooms(valid)
+        return
+      }
+      const updated = upsertRecentRoom(valid, { code: roomMeta.code, title: roomMeta.title })
       localStorage.setItem(storageKey, JSON.stringify(updated))
       setRecentRooms(updated)
     } catch {
-      setRecentRooms([{ code: roomMeta.code, title: roomMeta.title }])
+      setRecentRooms(roomMeta ? [{ code: roomMeta.code, title: roomMeta.title }] : [])
     }
   }, [user, roomMeta])
 
   useEffect(() => {
     const el = messagesContainerRef.current
     if (!el) return
+    if (skipAutoScrollRef.current) {
+      skipAutoScrollRef.current = false
+      return
+    }
     el.scrollTop = el.scrollHeight
   }, [messages.length, cohortThinking])
+
+  const mergedFairnessLogs = useMemo(
+    () => mergeFairnessLogs(logs, fairnessLogs),
+    [logs, fairnessLogs]
+  )
+
+  const handleLoadOlderMessages = async () => {
+    if (!roomMeta || loadingOlderMessages || !olderMessageCursorRef.current) return
+    setLoadingOlderMessages(true)
+    try {
+      const page = await loadOlderMessages(roomMeta.code, olderMessageCursorRef.current)
+      skipAutoScrollRef.current = true
+      hasLoadedOlderRef.current = true
+      olderMessageCursorRef.current = page.nextCursor
+      setHasMoreMessages(page.hasMore)
+      setMessages((prev) => mergeOlderMessages(prev, page.messages))
+    } catch (cause) {
+      const friendly = getFriendlyErrorMessage(cause, "Could not load older messages.")
+      showToast(friendly, "error")
+    } finally {
+      setLoadingOlderMessages(false)
+    }
+  }
 
   const handleGoogleSignIn = async () => {
     setSigningIn(true)
@@ -556,9 +656,14 @@ export default function CohortApp({
     } catch (cause) {
       const code = (cause as { code?: string })?.code || ""
       if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") {
-        // User dismissed popup; no alarming error needed.
-      } else if (code === "auth/popup-blocked") {
-        setError("Your browser blocked the sign-in popup. Please allow popups for this site and try again.")
+        // User dismissed popup; do not fall back or show an alarming error.
+      } else if (shouldFallbackToRedirectSignIn(cause)) {
+        try {
+          await signInWithRedirect(auth, googleProvider)
+          return
+        } catch {
+          setError("Google sign-in didn’t complete. Please try again.")
+        }
       } else {
         setError("Google sign-in didn’t complete. Please try again.")
       }
@@ -929,6 +1034,10 @@ export default function CohortApp({
 
   const handleLeaveRoom = async () => {
     setRoomMenuOpen(false)
+    if (roomMeta?.ownerId === user?.uid || memberRole === "owner") {
+      showToast("Transfer ownership is not available yet", "error")
+      return
+    }
     leftRoomRef.current = true
     if (roomMeta && user) {
       await leaveRoomMembership(roomMeta.code, user).catch(() => {})
@@ -1080,6 +1189,9 @@ export default function CohortApp({
           <p>
             The owner of room <strong>{roomMeta?.code || normalizedRouteCode}</strong> declined your
             request to join.
+            {rejectedUntilIso
+              ? ` You can ask again after ${formatRetryAfterTime(rejectedUntilIso)}.`
+              : ""}
           </p>
           <a className="primary-button" href="/join">
             Back to join page <ArrowRight size={16} />
@@ -1551,9 +1663,26 @@ export default function CohortApp({
                 <strong>{currentUserName}</strong>
                 <span>Google account</span>
               </div>
-              <button role="menuitem" onClick={() => void handleLeaveRoom()}>
-                <LogOut size={14} /> Leave room
-              </button>
+              {isOwner ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled
+                  title="Transfer ownership is not available yet"
+                  className="opacity-60 cursor-not-allowed flex-col items-start gap-0.5"
+                >
+                  <span className="flex items-center gap-2">
+                    <LogOut size={14} /> Leave room
+                  </span>
+                  <span className="text-[10px] text-[var(--muted-foreground)]">
+                    Transfer ownership is not available yet
+                  </span>
+                </button>
+              ) : (
+                <button type="button" role="menuitem" onClick={() => void handleLeaveRoom()}>
+                  <LogOut size={14} /> Leave room
+                </button>
+              )}
               <button role="menuitem" onClick={() => void handleSignOut()}>
                 <X size={14} /> Sign out
               </button>
@@ -1659,6 +1788,18 @@ export default function CohortApp({
             aria-label="Team messages"
             aria-live="polite"
           >
+            {hasMoreMessages && (
+              <div className="flex justify-center pb-1">
+                <button
+                  type="button"
+                  className="quick-status-btn flex-none px-3"
+                  onClick={() => void handleLoadOlderMessages()}
+                  disabled={loadingOlderMessages}
+                >
+                  {loadingOlderMessages ? "Loading older messages…" : "Load older messages"}
+                </button>
+              </div>
+            )}
             {messages.map((item) => {
               const senderMember = members.find((m) => m.uid === item.senderId)
               return <MessageRow key={item.id} message={item} member={senderMember} />
@@ -1807,7 +1948,7 @@ export default function CohortApp({
               roomTitle={activeRoom.title}
               members={approvedMembers}
               tasks={tasks}
-              logs={logs}
+              logs={mergedFairnessLogs}
               nowMs={nowMs}
               onToast={showToast}
             />

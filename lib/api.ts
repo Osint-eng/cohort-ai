@@ -3,15 +3,20 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   increment,
+  limit,
   onSnapshot,
   orderBy,
   query,
+  type QueryDocumentSnapshot,
   runTransaction,
   serverTimestamp,
   setDoc,
+  startAfter,
   Timestamp,
   updateDoc,
+  where,
   writeBatch,
 } from "firebase/firestore"
 import type { User } from "firebase/auth"
@@ -137,8 +142,163 @@ export class InviteExpiredOrLimitError extends Error {
   }
 }
 
+export class RejectedCooldownError extends Error {
+  untilIso: string
+  constructor(untilIso: string) {
+    super(`Your join request was declined. You can ask again after ${formatRetryAfterTime(untilIso)}.`)
+    this.name = "RejectedCooldownError"
+    this.untilIso = untilIso
+  }
+}
+
 export const ROOM_CODE_REGEX = /^[A-Z0-9]{8}$/
 export const PRESENCE_TTL_MS = 2 * 60 * 1000
+export const MESSAGE_WINDOW_LIMIT = 100
+export const OLDER_MESSAGES_PAGE_SIZE = 50
+export const ACTIVITY_LOG_LIMIT = 100
+export const REJECT_COOLDOWN_BASE_MS = 15 * 60 * 1000
+export const REJECT_COOLDOWN_MAX_MS = 24 * 60 * 60 * 1000
+export const RECENT_ROOMS_LIMIT = 8
+
+export type RecentRoomEntry = { code: string; title: string }
+
+export function getRecentRoomsStorageKey(uid: string): string {
+  return `cohort:recentRooms:${uid}`
+}
+
+export function upsertRecentRoom<T extends { code: string }>(
+  oldRooms: readonly T[],
+  entry: T,
+  maxCount = RECENT_ROOMS_LIMIT
+): T[] {
+  return [entry, ...oldRooms.filter((item) => item.code !== entry.code)].slice(0, maxCount)
+}
+
+const REDIRECT_FALLBACK_AUTH_CODES = new Set([
+  "auth/popup-blocked",
+  "auth/operation-not-supported-in-this-environment",
+  "auth/web-storage-unsupported",
+])
+
+export function shouldFallbackToRedirectSignIn(error: unknown): boolean {
+  const code =
+    typeof error === "string"
+      ? error
+      : error && typeof error === "object" && "code" in error
+        ? String((error as { code?: unknown }).code || "")
+        : ""
+  return REDIRECT_FALLBACK_AUTH_CODES.has(code)
+}
+
+export function computeRejectionCooldownMs(rejectionCount: number): number {
+  const k = Math.max(1, Math.floor(rejectionCount))
+  return Math.min(REJECT_COOLDOWN_BASE_MS * 2 ** (k - 1), REJECT_COOLDOWN_MAX_MS)
+}
+
+export function computeRejectionUntilDate(rejectedAtMs: number, rejectionCount: number): Date {
+  return new Date(rejectedAtMs + computeRejectionCooldownMs(rejectionCount))
+}
+
+export function formatRetryAfterTime(untilIsoOrMs: string | number): string {
+  const ms = typeof untilIsoOrMs === "number" ? untilIsoOrMs : Date.parse(untilIsoOrMs)
+  if (Number.isNaN(ms)) return "a short cooldown"
+  const date = new Date(ms)
+  const sameDay =
+    Math.abs(ms - Date.now()) < 12 * 60 * 60 * 1000 &&
+    date.toDateString() === new Date().toDateString()
+  return new Intl.DateTimeFormat(
+    undefined,
+    sameDay
+      ? { hour: "numeric", minute: "2-digit" }
+      : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
+  ).format(date)
+}
+
+export type MessageCursor = QueryDocumentSnapshot
+
+export function formatMessageWindowAscending(
+  descMessages: Message[],
+  maxCount = MESSAGE_WINDOW_LIMIT
+): Message[] {
+  const seen = new Set<string>()
+  const uniqueDesc: Message[] = []
+  for (const msg of descMessages) {
+    if (seen.has(msg.id)) continue
+    seen.add(msg.id)
+    uniqueDesc.push(msg)
+    if (uniqueDesc.length >= maxCount) break
+  }
+  return uniqueDesc.reverse()
+}
+
+export function mergeOlderMessages(
+  existingMessages: Message[],
+  olderMessagesAscending: Message[]
+): Message[] {
+  const existingIds = new Set(existingMessages.map((m) => m.id))
+  const seenOlder = new Set<string>()
+  const uniqueOlder: Message[] = []
+  for (const msg of olderMessagesAscending) {
+    if (existingIds.has(msg.id) || seenOlder.has(msg.id)) continue
+    seenOlder.add(msg.id)
+    uniqueOlder.push(msg)
+  }
+  return [...uniqueOlder, ...existingMessages]
+}
+
+export function mergeLiveMessages(
+  existingMessages: Message[],
+  liveAscending: Message[]
+): Message[] {
+  if (existingMessages.length === 0) return liveAscending
+  const liveIds = new Set(liveAscending.map((m) => m.id))
+  const retainedOlder = existingMessages.filter((m) => !liveIds.has(m.id))
+  return [...retainedOlder, ...liveAscending]
+}
+
+export function mergeFairnessLogs(
+  activityLogs: LogEntry[],
+  fairnessLogs: LogEntry[]
+): LogEntry[] {
+  const byId = new Map<string, LogEntry>()
+  for (const entry of activityLogs) {
+    byId.set(entry.id, entry)
+  }
+  for (const entry of fairnessLogs) {
+    if (!byId.has(entry.id)) {
+      byId.set(entry.id, entry)
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => {
+    const msA = Date.parse(a.ts)
+    const msB = Date.parse(b.ts)
+    if (!Number.isNaN(msA) && !Number.isNaN(msB) && msA !== msB) {
+      return msB - msA
+    }
+    if (!Number.isNaN(msB) && Number.isNaN(msA)) return 1
+    if (!Number.isNaN(msA) && Number.isNaN(msB)) return -1
+    return b.id.localeCompare(a.id)
+  })
+}
+
+export function estimateRoomOpenReads(params: {
+  messageLimit?: number
+  activityLimit?: number
+  tasksCount: number
+  membersCount: number
+  fairnessLogsCount: number
+}): number {
+  const messageLimit = params.messageLimit ?? MESSAGE_WINDOW_LIMIT
+  const activityLimit = params.activityLimit ?? ACTIVITY_LOG_LIMIT
+  return (
+    messageLimit +
+    activityLimit +
+    params.tasksCount +
+    params.membersCount +
+    1 +
+    params.fairnessLogsCount
+  )
+}
 
 export function normalizeRoomCode(code: string): string {
   return code.trim().toUpperCase()
@@ -185,7 +345,7 @@ export function getFriendlyErrorMessage(
   if (error instanceof RoomNotFoundError) {
     return "Room not found. Check the code and try again."
   }
-  if (error instanceof InviteExpiredOrLimitError) {
+  if (error instanceof InviteExpiredOrLimitError || error instanceof RejectedCooldownError) {
     return error.message
   }
 
@@ -275,6 +435,29 @@ function timestampToIso(value: unknown): string {
   return new Date().toISOString()
 }
 
+function docToMessage(docId: string, data: Record<string, unknown>): Message {
+  return {
+    id: String(data.id || docId),
+    senderId: String(data.senderId || ""),
+    name: String(data.senderName || "Teammate"),
+    text: String(data.text || ""),
+    ts: timestampToIso(data.createdAt),
+    role: data.role === "assistant" ? "assistant" : "user",
+  }
+}
+
+function docToLogEntry(docId: string, data: Record<string, unknown>): LogEntry {
+  return {
+    id: String(data.id || docId),
+    actorId: String(data.actorId || ""),
+    actor: String(data.actor || "Teammate"),
+    action: String(data.action || "updated"),
+    task_id: String(data.task_id || ""),
+    note: typeof data.note === "string" && data.note ? data.note : undefined,
+    ts: timestampToIso(data.createdAt),
+  }
+}
+
 export async function createRoomOnServer(user: User, title?: string): Promise<string> {
   const idToken = await user.getIdToken()
   const res = await fetch("/api/rooms", {
@@ -329,6 +512,13 @@ export async function ensureRoomMembership(
     const initialRole: MemberRole = isOwner ? "owner" : "pending"
     const initialStatus: "active" | "pending" = isOwner ? "active" : "pending"
     const cleanInviteId = inviteId?.trim() || ""
+
+    if (!isOwner) {
+      const blockedUntilIso = await getBlockedUntilIso(code, user.uid)
+      if (blockedUntilIso) {
+        throw new RejectedCooldownError(blockedUntilIso)
+      }
+    }
 
     if (cleanInviteId && !isOwner) {
       const invitePath = `rooms/${code}/invites/${cleanInviteId}`
@@ -445,13 +635,64 @@ export async function approvePendingMember(rawCode: string, memberUid: string): 
   }
 }
 
+export async function getBlockedUntilIso(rawCode: string, uid: string): Promise<string | null> {
+  const code = normalizeRoomCode(rawCode)
+  if (!ROOM_CODE_REGEX.test(code) || !uid) return null
+  const blockedPath = `rooms/${code}/blocked/${uid}`
+  let blockedSnap
+  try {
+    blockedSnap = await getDoc(doc(db, "rooms", code, "blocked", uid))
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, blockedPath)
+  }
+  if (!blockedSnap.exists()) return null
+  const untilIso = timestampToIso(blockedSnap.data()?.until)
+  const untilMs = Date.parse(untilIso)
+  if (!Number.isNaN(untilMs) && untilMs > Date.now()) {
+    return untilIso
+  }
+  return null
+}
+
 export async function rejectPendingMember(rawCode: string, memberUid: string): Promise<void> {
   const code = normalizeRoomCode(rawCode)
-  const memberPath = `rooms/${code}/members/${memberUid}`
+  const blockedPath = `rooms/${code}/blocked/${memberUid}`
+  const blockedRef = doc(db, "rooms", code, "blocked", memberUid)
+  let blockedSnap
   try {
-    await deleteDoc(doc(db, "rooms", code, "members", memberUid))
+    blockedSnap = await getDoc(blockedRef)
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, memberPath)
+    handleFirestoreError(error, OperationType.GET, blockedPath)
+  }
+
+  const prevCount =
+    blockedSnap.exists() && typeof blockedSnap.data()?.count === "number"
+      ? blockedSnap.data().count
+      : 0
+  const nextCount = Math.max(1, prevCount + 1)
+  const untilDate = computeRejectionUntilDate(Date.now(), nextCount)
+
+  const batch = writeBatch(db)
+  batch.delete(doc(db, "rooms", code, "members", memberUid))
+  if (blockedSnap.exists()) {
+    batch.update(blockedRef, {
+      count: nextCount,
+      until: Timestamp.fromDate(untilDate),
+      updatedAt: serverTimestamp(),
+    })
+  } else {
+    batch.set(blockedRef, {
+      uid: memberUid,
+      count: nextCount,
+      until: Timestamp.fromDate(untilDate),
+      updatedAt: serverTimestamp(),
+    })
+  }
+
+  try {
+    await batch.commit()
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, blockedPath)
   }
 }
 
@@ -647,11 +888,52 @@ export async function setMemberPresence(code: string, user: User, online: boolea
 
 export async function leaveRoomMembership(code: string, user: User): Promise<void> {
   const normalized = normalizeRoomCode(code)
+  const roomPath = `rooms/${normalized}`
+  let roomSnap
+  try {
+    roomSnap = await getDoc(doc(db, "rooms", normalized))
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, roomPath)
+  }
+  if (roomSnap.exists() && roomSnap.data()?.ownerId === user.uid) {
+    throw new Error("Transfer ownership is not available yet")
+  }
   const memberPath = `rooms/${normalized}/members/${user.uid}`
   try {
     await deleteDoc(doc(db, "rooms", normalized, "members", user.uid))
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, memberPath)
+  }
+}
+
+export async function loadOlderMessages(
+  rawCode: string,
+  cursor: MessageCursor,
+  pageSize = OLDER_MESSAGES_PAGE_SIZE
+): Promise<{
+  messages: Message[]
+  nextCursor: MessageCursor | null
+  hasMore: boolean
+}> {
+  const code = normalizeRoomCode(rawCode)
+  let snap
+  try {
+    snap = await getDocs(
+      query(
+        collection(db, "rooms", code, "messages"),
+        orderBy("createdAt", "desc"),
+        startAfter(cursor),
+        limit(pageSize)
+      )
+    )
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, `rooms/${code}/messages`)
+  }
+  const descMessages = snap.docs.map((d) => docToMessage(d.id, d.data()))
+  return {
+    messages: formatMessageWindowAscending(descMessages, pageSize),
+    nextCursor: snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null,
+    hasMore: snap.docs.length === pageSize,
   }
 }
 
@@ -661,8 +943,10 @@ export function subscribeToRoom(
     onRoom: (meta: RoomMeta) => void
     onMembers: (members: Member[]) => void
     onMessages: (messages: Message[]) => void
+    onMessagesMeta?: (meta: { cursor: MessageCursor | null; hasMore: boolean }) => void
     onTasks: (tasks: Task[]) => void
     onLogs: (logs: LogEntry[]) => void
+    onFairnessLogs?: (logs: LogEntry[]) => void
     onNotFound: () => void
     onError: (err: Error) => void
   }
@@ -719,20 +1003,18 @@ export function subscribeToRoom(
   )
 
   const unsubMessages = onSnapshot(
-    query(collection(db, "rooms", code, "messages"), orderBy("createdAt", "asc")),
+    query(
+      collection(db, "rooms", code, "messages"),
+      orderBy("createdAt", "desc"),
+      limit(MESSAGE_WINDOW_LIMIT)
+    ),
     (snap) => {
-      const list: Message[] = snap.docs.map((d) => {
-        const data = d.data()
-        return {
-          id: String(data.id || d.id),
-          senderId: String(data.senderId || ""),
-          name: String(data.senderName || "Teammate"),
-          text: String(data.text || ""),
-          ts: timestampToIso(data.createdAt),
-          role: data.role === "assistant" ? "assistant" : "user",
-        }
+      const descList: Message[] = snap.docs.map((d) => docToMessage(d.id, d.data()))
+      callbacks.onMessages(formatMessageWindowAscending(descList, MESSAGE_WINDOW_LIMIT))
+      callbacks.onMessagesMeta?.({
+        cursor: snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null,
+        hasMore: snap.docs.length === MESSAGE_WINDOW_LIMIT,
       })
-      callbacks.onMessages(list)
     },
     (error) => {
       try {
@@ -777,20 +1059,13 @@ export function subscribeToRoom(
   )
 
   const unsubLogs = onSnapshot(
-    query(collection(db, "rooms", code, "logs"), orderBy("createdAt", "desc")),
+    query(
+      collection(db, "rooms", code, "logs"),
+      orderBy("createdAt", "desc"),
+      limit(ACTIVITY_LOG_LIMIT)
+    ),
     (snap) => {
-      const list: LogEntry[] = snap.docs.map((d) => {
-        const data = d.data()
-        return {
-          id: String(data.id || d.id),
-          actorId: String(data.actorId || ""),
-          actor: String(data.actor || "Teammate"),
-          action: String(data.action || "updated"),
-          task_id: String(data.task_id || ""),
-          note: typeof data.note === "string" && data.note ? data.note : undefined,
-          ts: timestampToIso(data.createdAt),
-        }
-      })
+      const list: LogEntry[] = snap.docs.map((d) => docToLogEntry(d.id, d.data()))
       callbacks.onLogs(list)
     },
     (error) => {
@@ -802,12 +1077,33 @@ export function subscribeToRoom(
     }
   )
 
+  const unsubFairnessLogs = callbacks.onFairnessLogs
+    ? onSnapshot(
+        query(
+          collection(db, "rooms", code, "logs"),
+          where("action", "in", ["completed", "started"])
+        ),
+        (snap) => {
+          const list: LogEntry[] = snap.docs.map((d) => docToLogEntry(d.id, d.data()))
+          callbacks.onFairnessLogs?.(list)
+        },
+        (error) => {
+          try {
+            handleFirestoreError(error, OperationType.LIST, `rooms/${code}/logs`)
+          } catch (wrapped) {
+            callbacks.onError(wrapped as Error)
+          }
+        }
+      )
+    : () => {}
+
   return () => {
     unsubRoom()
     unsubMembers()
     unsubMessages()
     unsubTasks()
     unsubLogs()
+    unsubFairnessLogs()
   }
 }
 
@@ -861,6 +1157,7 @@ export async function runCohortCommand(
     body: JSON.stringify({
       roomCode: code,
       ...payload,
+      tzOffsetMinutes: new Date().getTimezoneOffset(),
     }),
   })
   const data = (await res.json().catch(() => ({}))) as { error?: string }
@@ -897,7 +1194,10 @@ export async function triggerCohortPulse(
       Authorization: `Bearer ${idToken}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ roomCode: code }),
+    body: JSON.stringify({
+      roomCode: code,
+      tzOffsetMinutes: new Date().getTimezoneOffset(),
+    }),
   })
   const data = (await res.json().catch(() => ({}))) as {
     nudged?: boolean

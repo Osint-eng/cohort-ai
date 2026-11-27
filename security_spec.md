@@ -6,7 +6,8 @@
 3. **Master Gate Membership & Owner Approval**:
    - New users joining a room via code or invite link receive `role: "pending"`, `status: "pending"` (only room creators matching `rooms/{roomCode}.ownerId` may join initially as `role: "owner"`, `status: "active"`).
    - Pending users can only read room metadata and their own member document. Only approved full members (`role` in `["owner", "member"]`) can read or write `/messages`, `/tasks`, or `/logs`, or list all `/members`.
-   - Only the room owner can promote a `pending` member to `member` (`status: "active"`) or reject/delete a pending member.
+   - Only the room owner can promote a `pending` member to `member` (`status: "active"`) or reject/delete a pending member. Room owners cannot delete their own member document (owners cannot leave and orphan a room).
+   - Rejecting a pending member writes `/rooms/{roomCode}/blocked/{uid}` (`{ uid, count, until, updatedAt }`, owner-only write, user may `get` their own doc). Creating a new pending member requires `!exists(blocked)` or `request.time >= blocked.until`.
 4. **Identity Binding**:
    - A member document `/rooms/{roomCode}/members/{memberId}` can only be created by `request.auth.uid == memberId` with `incoming().uid == request.auth.uid`, and self-updates cannot alter `role`.
    - User chat messages (`role == 'user'`) must have `senderId == request.auth.uid` and `triggeredBy == request.auth.uid`.
@@ -20,7 +21,7 @@
    - `createdAt`, `joinedAt`, `updatedAt`, `lastSeenAt`, `agentStatusAt`, `lastProactiveAt`, and `lastPulseCheckAt` must equal `request.time` on creation/update.
    - `ownerId`, `code`, `createdAt`, `joinedAt`, `uid`, `createdBy` are immutable after creation.
    - `agentAggressiveness` (`low` | `medium` | `high`) may only be updated by the room owner.
-8. **Strict Schemas, Board Caps & Rate Limits**: Every document write validates exact required/allowed keys (`hasAll` + `hasOnly`), types, enums (`status`, `task_type` in `["frontend", "backend", "design", "research", "general"]`), optional integer task `weight` (`1..3`), ID patterns, string length limits (`description <= 500`), a room task sequence cap (`nextTaskNumber <= 1000`), and per-user fixed 10-minute window counters persisted at `/rateLimits/{userId}` (10 rooms / 20 AI commands per 10 minutes, guarded by `request.time` window-reset rules and `ifMatchUpdateTime` optimistic concurrency).
+8. **Strict Schemas, Board Caps & Rate Limits**: Every document write validates exact required/allowed keys (`hasAll` + `hasOnly`), types, enums (`status`, `task_type` in `["frontend", "backend", "design", "research", "general"]`), optional integer task `weight` (`1..3`), ID patterns, string length limits (`description <= 500`), a room task sequence cap (`nextTaskNumber <= 1000`), a bounded room `nudgeState` map (`<= 40` entries), and per-user fixed 10-minute window counters persisted at `/rateLimits/{userId}` (10 rooms / 20 AI commands per 10 minutes, guarded by `request.time` window-reset rules and `ifMatchUpdateTime` optimistic concurrency).
 
 ## 2. The "Dirty Dozen" Payloads (Adversarial Tests)
 1. **Unauthenticated Room Read/Write**: Unauthenticated user tries to read `/rooms/ABCD1234` -> `PERMISSION_DENIED`.

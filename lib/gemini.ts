@@ -13,8 +13,29 @@ import {
 } from "./task-sandbox"
 
 const MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-4-hydrogen"
-const GEMINI_TIMEOUT_MS = 25_000
-const GEMINI_RETRY_DELAY_MS = 600
+export const GEMINI_TIMEOUT_MS = 25_000
+export const GEMINI_TOTAL_BUDGET_MS = 40_000
+export const GEMINI_MIN_REMAINING_BUDGET_MS = 5_000
+export const GEMINI_MAX_RETRIES = 2
+export const GEMINI_BASE_BACKOFF_MS = 500
+export const GEMINI_MAX_JITTER_MS = 250
+
+export type GeminiCallDeps = {
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+  randomJitterMs?: () => number
+}
+
+export function computeGeminiRetryDelayMs(retryAttempt: number, jitterMs: number): number {
+  const safeAttempt = Math.max(0, Math.floor(retryAttempt))
+  const safeJitter = Math.max(0, Math.min(GEMINI_MAX_JITTER_MS, Math.floor(jitterMs)))
+  return GEMINI_BASE_BACKOFF_MS * 2 ** safeAttempt + safeJitter
+}
+
+export function computeGeminiAttemptTimeoutMs(elapsedMs: number): number {
+  const remaining = Math.max(0, GEMINI_TOTAL_BUDGET_MS - Math.max(0, elapsedMs))
+  return Math.min(GEMINI_TIMEOUT_MS, remaining)
+}
 
 export class GeminiQuotaError extends Error {
   constructor(
@@ -65,18 +86,36 @@ function getGeminiErrorStatus(error: unknown): number | undefined {
   return undefined
 }
 
-async function callGenerateContent(params: {
+export async function callGenerateContent(params: {
   contents: string
   config?: GenerateContentConfig
   maxOutputTokens: number
+  deps?: GeminiCallDeps
 }): Promise<GenerateContentResponse> {
   const ai = getGeminiClient()
+  const now = params.deps?.now ?? Date.now
+  const sleep =
+    params.deps?.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const randomJitterMs =
+    params.deps?.randomJitterMs ??
+    (() => Math.floor(Math.random() * GEMINI_MAX_JITTER_MS))
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const startMs = now()
+
+  for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
+    const elapsedMs = Math.max(0, now() - startMs)
+    const attemptTimeoutMs = computeGeminiAttemptTimeoutMs(elapsedMs)
+    if (attemptTimeoutMs <= 0) {
+      throw new GeminiBadOutputError(
+        "@cohort took too long to hear back from Gemini. Please try again."
+      )
+    }
+
     const controller = new AbortController()
     const timeoutId = setTimeout(() => {
       controller.abort(new Error("Gemini request timed out"))
-    }, GEMINI_TIMEOUT_MS)
+    }, attemptTimeoutMs)
 
     try {
       return await ai.models.generateContent({
@@ -98,9 +137,17 @@ async function callGenerateContent(params: {
         )
       }
       const status = getGeminiErrorStatus(error)
-      if ((status === 429 || status === 503) && attempt === 0) {
-        await new Promise((resolve) => setTimeout(resolve, GEMINI_RETRY_DELAY_MS))
-        continue
+      if ((status === 429 || status === 503) && attempt < GEMINI_MAX_RETRIES) {
+        const elapsedAfterAttempt = Math.max(0, now() - startMs)
+        const remainingBudgetMs = GEMINI_TOTAL_BUDGET_MS - elapsedAfterAttempt
+        const delayMs = computeGeminiRetryDelayMs(attempt, randomJitterMs())
+        if (
+          remainingBudgetMs >= GEMINI_MIN_REMAINING_BUDGET_MS &&
+          remainingBudgetMs - delayMs >= GEMINI_MIN_REMAINING_BUDGET_MS
+        ) {
+          await sleep(delayMs)
+          continue
+        }
       }
       if (status === 429) {
         throw new GeminiQuotaError()
@@ -211,7 +258,7 @@ export async function extractBoardWithGemini(input: {
     `Extract a crisp 1-sentence project summary and 1 to ${maxTasks} concrete, actionable tasks for this student team.`,
     `Use sequential IDs starting at t${startNumber} (t${startNumber}, t${startNumber + 1}...) and distribute tasks across the available team members when reasonable.`,
     "For each task, set suggested_owner to a member's exact handle (or '@Unassigned') and set owner_uid to that member's exact uid (or '' if '@Unassigned').",
-    "Format due_date concisely like 'Nov 20' or 'Dec 02' (use dates from the brief if mentioned, otherwise realistic milestones after today).",
+    "Format due_date strictly as ISO YYYY-MM-DD (e.g. '2026-11-28') using dates from the brief or realistic milestones after today, or 'TBD' if no date applies.",
     "For each task, include a crisp 1-sentence description (acceptance criteria/scope, max 220 chars), classify task_type as one of: frontend, backend, design, research, general, and assign an integer effort weight from 1 (small/quick) to 3 (large/complex).",
     "Set status to 'todo' unless the brief explicitly says a task is already in progress, blocked, or done.",
   ].join("\n")
@@ -269,7 +316,7 @@ export async function extractBoardWithGemini(input: {
                 },
                 due_date: {
                   type: Type.STRING,
-                  description: "Short due date label such as Nov 20.",
+                  description: "Due date strictly in YYYY-MM-DD format (or 'TBD' if unknown).",
                 },
                 status: {
                   type: Type.STRING,
@@ -330,7 +377,8 @@ export async function extractBoardWithGemini(input: {
       if (!owner.startsWith("@")) owner = `@${owner}`
     }
     owner = owner.slice(0, 80) || "@Unassigned"
-    const dueDate = String(t.due_date || "TBD").trim().slice(0, 40) || "TBD"
+    const rawDueDate = typeof t.due_date === "string" ? t.due_date.trim() : ""
+    const dueDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDueDate) ? rawDueDate : "TBD"
     const rawStatus = String(t.status || "todo").trim()
     const status = (VALID_STATUSES.has(rawStatus) ? rawStatus : "todo") as ExtractedTask["status"]
     const rawWeight =

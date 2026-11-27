@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest"
 import type { LogEntry, Member, Task } from "./api"
-import { computeFairnessReport } from "./fairness"
+import {
+  buildFairnessCsv,
+  computeDecayedCompletionPoints,
+  computeDecayedStartPoints,
+  computeFairnessReport,
+  escapeCsvCell,
+} from "./fairness"
 
 const NOW_MS = Date.parse("2026-11-26T18:00:00.000Z")
 
@@ -37,7 +43,7 @@ function makeLog(
   actor: string,
   action: string,
   task_id: string,
-  minutesAgo: number
+  secondsAgo: number
 ): LogEntry {
   return {
     id,
@@ -45,7 +51,7 @@ function makeLog(
     actor,
     action,
     task_id,
-    ts: new Date(NOW_MS - minutesAgo * 60_000).toISOString(),
+    ts: new Date(NOW_MS - secondsAgo * 1_000).toISOString(),
   }
 }
 
@@ -220,3 +226,116 @@ describe("computeFairnessReport", () => {
     expect(report.fairnessScore).toBe(100)
   })
 })
+
+describe("Formula G5: CSV formula injection guard", () => {
+  it("prefixes dangerous string cells with a single quote while leaving safe strings and numbers unchanged", () => {
+    expect(escapeCsvCell("=1+1")).toBe("'=1+1")
+    expect(escapeCsvCell("+91 77")).toBe("'+91 77")
+    expect(escapeCsvCell("-cmd")).toBe("'-cmd")
+    expect(escapeCsvCell("@SUM(A1)")).toBe("'@SUM(A1)")
+    expect(escapeCsvCell("\tfoo")).toBe("'\tfoo")
+    expect(escapeCsvCell("\rbar")).toBe("'\rbar")
+    expect(escapeCsvCell("Priya")).toBe("Priya")
+    expect(escapeCsvCell(5)).toBe("5")
+    expect(escapeCsvCell(-5)).toBe("-5")
+    expect(escapeCsvCell('=1+1, "hi"')).toBe('"\'=1+1, ""hi"""')
+  })
+
+  it("escapes member names and room titles in buildFairnessCsv", () => {
+    const alice = makeMember("u1", "=1+1", "owner")
+    const bob = makeMember("u2", "+91 77")
+    const priya = makeMember("u3", "Priya")
+    const report = computeFairnessReport({
+      members: [alice, bob, priya],
+      tasks: [makeTask("t1", { status: "done" })],
+      logs: [makeLog("l1", "u3", "Priya", "completed", "t1", 10)],
+      nowMs: NOW_MS,
+    })
+
+    const csv = buildFairnessCsv("ROOM1234", "@EvilTitle", report)
+    const lines = csv.split("\n")
+    expect(lines.some((line) => line.startsWith("ROOM1234,'@EvilTitle,'=1+1,"))).toBe(true)
+    expect(lines.some((line) => line.startsWith("ROOM1234,'@EvilTitle,'+91 77,"))).toBe(true)
+    expect(lines.some((line) => line.startsWith("ROOM1234,'@EvilTitle,Priya,"))).toBe(true)
+  })
+})
+
+describe("Formula G9: recency decay in fairness", () => {
+  it("decays weight-1 completion points to 3 at age 0, 1.5 at age 7, and 0.75 at age 14", () => {
+    expect(computeDecayedCompletionPoints(1, 0)).toBe(3)
+    expect(computeDecayedCompletionPoints(1, 7)).toBe(1.5)
+    expect(computeDecayedCompletionPoints(1, 14)).toBe(0.75)
+    expect(computeDecayedStartPoints(0)).toBe(1)
+    expect(computeDecayedStartPoints(7)).toBe(0.5)
+    expect(computeDecayedStartPoints(14)).toBe(0.25)
+
+    const makeAtAgeDays = (id: string, uid: string, name: string, ageDays: number): LogEntry => ({
+      id,
+      actorId: uid,
+      actor: name,
+      action: "completed",
+      task_id: `t_${ageDays}`,
+      ts: new Date(NOW_MS - ageDays * 86_400_000).toISOString(),
+    })
+
+    for (const [ageDays, expected] of [
+      [0, 3],
+      [7, 1.5],
+      [14, 0.75],
+    ] as const) {
+      const alice = makeMember("u1", "Alice", "owner")
+      const report = computeFairnessReport({
+        members: [alice],
+        tasks: [makeTask(`t_${ageDays}`, { status: "done", weight: 1 })],
+        logs: [makeAtAgeDays(`l_${ageDays}`, "u1", "Alice", ageDays)],
+        nowMs: NOW_MS,
+      })
+      expect(report.members[0]?.points).toBe(expected)
+    }
+  })
+
+  it("preserves the exact fairness score when all members have equal log ages", () => {
+    const alice = makeMember("u1", "Alice", "owner")
+    const bob = makeMember("u2", "Bob")
+    const tasks: Task[] = [
+      makeTask("t1", { owner_uid: "u1", status: "done", weight: 1 }),
+      makeTask("t2", { owner_uid: "u1", status: "done", weight: 1 }),
+      makeTask("t3", { owner_uid: "u2", status: "done", weight: 1 }),
+    ]
+
+    const logsAtAge = (ageDays: number): LogEntry[] => {
+      const ts = new Date(NOW_MS - ageDays * 86_400_000).toISOString()
+      return [
+        { id: "l1", actorId: "u1", actor: "Alice", action: "started", task_id: "t1", ts },
+        { id: "l2", actorId: "u1", actor: "Alice", action: "completed", task_id: "t1", ts },
+        { id: "l3", actorId: "u1", actor: "Alice", action: "completed", task_id: "t2", ts },
+        { id: "l4", actorId: "u2", actor: "Bob", action: "completed", task_id: "t3", ts },
+      ]
+    }
+
+    // Without decay (age 0): Alice = 7, Bob = 3 -> J = (10^2) / (2 * (49 + 9)) = 100 / 116 -> 86
+    const baseline = computeFairnessReport({
+      members: [alice, bob],
+      tasks,
+      logs: logsAtAge(0),
+      nowMs: NOW_MS,
+    })
+    const aged7 = computeFairnessReport({
+      members: [alice, bob],
+      tasks,
+      logs: logsAtAge(7),
+      nowMs: NOW_MS,
+    })
+    const aged14 = computeFairnessReport({
+      members: [alice, bob],
+      tasks,
+      logs: logsAtAge(14),
+      nowMs: NOW_MS,
+    })
+
+    expect(baseline.fairnessScore).toBe(86)
+    expect(aged7.fairnessScore).toBe(baseline.fairnessScore)
+    expect(aged14.fairnessScore).toBe(baseline.fairnessScore)
+  })
+})
+

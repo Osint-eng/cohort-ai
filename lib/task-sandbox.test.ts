@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { compilePreviewSrcDoc } from "./task-sandbox"
+import { buildStarterFilesForTask, compilePreviewSrcDoc } from "./task-sandbox"
 
 describe("compilePreviewSrcDoc (react)", () => {
   it("loads pinned React 18.3.1 and ReactDOM 18.3.1 UMD builds from cdnjs and mounts with ReactDOM.createRoot", () => {
@@ -40,5 +40,43 @@ export default function App() {
 
     expect(result.compileError).toBeTruthy()
     expect(result.html).toContain("JSX Compile Error")
+  })
+})
+
+describe("buildStarterFilesForTask (backend)", () => {
+  it("generates index.js for node:http and references an existing start file in package.json", () => {
+    const starter = buildStarterFilesForTask(
+      {
+        id: "t4",
+        title: "Build webhook receiver endpoint",
+        description: "Validate JSON payloads and return acknowledgement",
+        task_type: "backend",
+        suggested_owner: "@Priya",
+        due_date: "2026-12-01",
+        status: "todo",
+      },
+      "Launch Room",
+      "Capstone service",
+      "backend"
+    )
+
+    expect(starter.templateMode).toBe("backend")
+    expect(starter.files["handler.ts"]).toBeTruthy()
+    expect(starter.files["package.json"]).toBeTruthy()
+
+    const pkg = JSON.parse(starter.files["package.json"]) as {
+      main?: string
+      scripts?: { start?: string }
+    }
+    expect(pkg.main).toBe("index.js")
+    expect(pkg.scripts?.start).toBe("node index.js")
+
+    const startTarget = pkg.scripts?.start?.replace(/^node\s+/, "").trim() || ""
+    expect(startTarget).toBe("index.js")
+    expect(starter.files[startTarget]).toBeTruthy()
+    expect(starter.files[startTarget]).toContain('require("node:http")')
+    expect(starter.files[startTarget]).toContain("process.env.PORT")
+    expect(starter.files[startTarget]).toContain("3000")
+    expect(starter.files[startTarget]).toContain("/api/t4")
   })
 })

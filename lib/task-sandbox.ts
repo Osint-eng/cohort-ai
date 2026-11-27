@@ -885,14 +885,93 @@ export async function POST(req: NextRequest) {
       null,
       2
     )
+    const safeTitleComment = task.title.replace(/[\r\n]+/g, " ")
+    const indexJs = `// ${task.id.toUpperCase()}: ${safeTitleComment}
+// Owner: ${task.suggested_owner.replace(/[\r\n]+/g, " ")} | Due: ${task.due_date}
+const http = require("node:http");
+
+const PORT = Number(process.env.PORT) || 3000;
+const TASK_ID = ${escapeJsString(task.id)};
+const ENDPOINT = ${escapeJsString(`/api/${slug}`)};
+const MAX_BODY_BYTES = 1024 * 1024;
+
+function sendJson(res, statusCode, data) {
+  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(data));
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(Object.assign(new Error("Payload too large"), { statusCode: 413 }));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8").trim();
+      if (!raw) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(Object.assign(new Error("Invalid JSON payload"), { statusCode: 400 }));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url || "/", "http://localhost");
+  const method = (req.method || "GET").toUpperCase();
+
+  if (method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
+    return sendJson(res, 200, { ok: true, taskId: TASK_ID, endpoint: ENDPOINT });
+  }
+
+  if (method === "POST" && url.pathname === ENDPOINT) {
+    try {
+      const body = await readJsonBody(req);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return sendJson(res, 400, { error: "Invalid request payload: expected a JSON object" });
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        taskId: TASK_ID,
+        receivedAt: new Date().toISOString(),
+        payload: body,
+      });
+    } catch (error) {
+      const status = error && typeof error.statusCode === "number" ? error.statusCode : 500;
+      const message = error instanceof Error ? error.message : "Server error";
+      return sendJson(res, status, { error: message });
+    }
+  }
+
+  return sendJson(res, 404, { error: "Not found", expected: \`POST \${ENDPOINT}\` });
+});
+
+server.listen(PORT, () => {
+  console.log(\`\${TASK_ID} server listening on port \${PORT} (POST \${ENDPOINT})\`);
+});
+`
+
     const packageJson = JSON.stringify(
       {
         name: `cohort-${slug}-service`,
         version: "1.0.0",
         description: task.title,
-        main: "handler.ts",
+        main: "index.js",
         scripts: {
-          start: "node handler.ts",
+          start: "node index.js",
         },
       },
       null,
@@ -902,6 +981,7 @@ export async function POST(req: NextRequest) {
     return {
       templateMode: "backend",
       files: {
+        "index.js": indexJs,
         "handler.ts": handlerTs,
         "schema.json": schemaJson,
         "TASK_BRIEF.md": briefMd,

@@ -17,9 +17,13 @@ import {
   generateProactiveNudgeWithGemini,
 } from "@/lib/gemini"
 import {
+  buildNextNudgeState,
   evaluateProactiveNudge,
+  getLocalTodayIso,
   isWithinPulseCheckThrottle,
   normalizeAggressiveness,
+  normalizeTzOffsetMinutes,
+  parseNudgeState,
   PROACTIVE_THRESHOLDS,
 } from "@/lib/proactive-cohort"
 
@@ -33,7 +37,11 @@ export async function POST(req: NextRequest) {
   try {
     const user = await verifyFirebaseIdToken(req.headers.get("authorization"))
 
-    const body = (await req.json().catch(() => ({}))) as { roomCode?: unknown }
+    const body = (await req.json().catch(() => ({}))) as {
+      roomCode?: unknown
+      tzOffsetMinutes?: unknown
+    }
+    const tzOffsetMinutes = normalizeTzOffsetMinutes(body.tzOffsetMinutes)
     const roomCode = typeof body.roomCode === "string" ? body.roomCode.trim().toUpperCase() : ""
     if (!ROOM_CODE_REGEX.test(roomCode)) {
       return NextResponse.json({ error: "Invalid room code" }, { status: 400 })
@@ -109,27 +117,44 @@ export async function POST(req: NextRequest) {
       createdAt: typeof d.data.createdAt === "string" ? d.data.createdAt : undefined,
     }))
 
+    const nudgeState = parseNudgeState(roomData.nudgeState)
+
     const evaluation = evaluateProactiveNudge({
       aggressiveness,
       lastProactiveAtIso,
       roomCreatedAtIso: typeof roomData.createdAt === "string" ? roomData.createdAt : undefined,
+      nudgeState,
       tasks,
       messages,
       nowMs,
+      tzOffsetMinutes,
     })
 
     const currentAgentStatus = roomData.agentStatus === "thinking" ? "thinking" : "watching"
 
     if (!evaluation.shouldNudge || !evaluation.reason || !evaluation.summaryContext) {
+      const prunedNudgeState = buildNextNudgeState({
+        currentState: nudgeState,
+        tasks,
+        nowMs,
+      })
+      const hasStaleNudgeEntries =
+        Object.keys(prunedNudgeState).length < Object.keys(nudgeState).length
+      const checkUpdateData: Record<string, unknown> = { agentStatus: currentAgentStatus }
+      const checkUpdateMask = ["agentStatus"]
+      if (hasStaleNudgeEntries) {
+        checkUpdateData.nudgeState = prunedNudgeState
+        checkUpdateMask.push("nudgeState")
+      }
       try {
         await fsCommit(
           [
             {
               type: "update",
               path: `rooms/${roomCode}`,
-              data: { agentStatus: currentAgentStatus },
+              data: checkUpdateData,
               serverTimestampFields: ["lastPulseCheckAt", "updatedAt"],
-              updateMaskFields: ["agentStatus"],
+              updateMaskFields: checkUpdateMask,
               ifMatchUpdateTime: roomWithMeta.updateTime,
             },
           ],
@@ -147,7 +172,7 @@ export async function POST(req: NextRequest) {
     // Only enforce LLM rate limit when a proactive check actually requires Gemini generation
     await enforceUserRateLimit(user.uid, user.idToken, "cohort")
 
-    const todayIso = new Date().toISOString().slice(0, 10)
+    const todayIso = getLocalTodayIso(nowMs, tzOffsetMinutes)
     const roomTitle = String(roomData.title || "Project room")
     const nudgeText = await generateProactiveNudgeWithGemini({
       roomTitle,
@@ -167,15 +192,25 @@ export async function POST(req: NextRequest) {
           ? "Proactive check on upcoming deadline"
           : "Proactive check-in after quiet period"
 
+    const nextNudgeState = buildNextNudgeState({
+      currentState: nudgeState,
+      tasks,
+      nudgedTaskId: evaluation.targetTaskId,
+      nowMs,
+    })
+
     try {
       await fsCommit(
         [
           {
             type: "update",
             path: `rooms/${roomCode}`,
-            data: { agentStatus: "watching" },
+            data: {
+              agentStatus: "watching",
+              nudgeState: nextNudgeState,
+            },
             serverTimestampFields: ["lastProactiveAt", "lastPulseCheckAt", "agentStatusAt", "updatedAt"],
-            updateMaskFields: ["agentStatus"],
+            updateMaskFields: ["agentStatus", "nudgeState"],
             ifMatchUpdateTime: roomWithMeta.updateTime,
           },
           {

@@ -59,6 +59,10 @@
           "format": "date-time",
           "description": "Server timestamp when @cohort pulse last evaluated this room."
         },
+        "nudgeState": {
+          "type": "object",
+          "description": "Per-task proactive nudge backoff state keyed by task ID (max 40 entries)."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -385,6 +389,35 @@
         }
       },
       "required": ["id", "createdBy", "createdAt", "expiresAt", "maxUses", "usedCount", "active"]
+    },
+    "BlockedMember": {
+      "title": "BlockedMember",
+      "description": "Rejection cooldown record preventing an immediately rejected user from re-requesting room access before `until`.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the rejected user."
+        },
+        "count": {
+          "type": "integer",
+          "description": "Cumulative rejection count used for exponential cooldown backoff."
+        },
+        "until": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp after which the user may submit a new join request."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest rejection."
+        }
+      },
+      "required": ["uid", "count", "until", "updatedAt"]
     }
   },
   "firestore": {
@@ -399,6 +432,10 @@
     "/rooms/{roomCode}/invites/{inviteId}": {
       "schema": { "$ref": "#/entities/Invite" },
       "description": "Temporary expiring invite links created by the room owner."
+    },
+    "/rooms/{roomCode}/blocked/{blockedUid}": {
+      "schema": { "$ref": "#/entities/BlockedMember" },
+      "description": "Per-user rejection cooldown records keyed by Firebase Auth UID."
     },
     "/rooms/{roomCode}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/Message" },

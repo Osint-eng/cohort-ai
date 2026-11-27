@@ -19,6 +19,9 @@ vi.mock("@google/genai", async (importOriginal) => {
 
 import { ApiError } from "@google/genai"
 import {
+  callGenerateContent,
+  computeGeminiAttemptTimeoutMs,
+  computeGeminiRetryDelayMs,
   extractBoardWithGemini,
   GeminiBadOutputError,
   GeminiQuotaError,
@@ -133,9 +136,10 @@ describe("lib/gemini wrapper", () => {
     expect(mocks.generateContent).toHaveBeenCalledTimes(2)
   })
 
-  it("retries once on 429 and throws GeminiQuotaError if still rate limited", async () => {
+  it("retries up to 2 times on 429 and throws GeminiQuotaError after three consecutive 429s", async () => {
     vi.useFakeTimers()
     mocks.generateContent
+      .mockRejectedValueOnce(new ApiError({ message: "Quota exceeded", status: 429 }))
       .mockRejectedValueOnce(new ApiError({ message: "Quota exceeded", status: 429 }))
       .mockRejectedValueOnce(new ApiError({ message: "Quota exceeded", status: 429 }))
 
@@ -147,9 +151,9 @@ describe("lib/gemini wrapper", () => {
     })
 
     const assertion = expect(promise).rejects.toBeInstanceOf(GeminiQuotaError)
-    await vi.advanceTimersByTimeAsync(1000)
+    await vi.advanceTimersByTimeAsync(2_000)
     await assertion
-    expect(mocks.generateContent).toHaveBeenCalledTimes(2)
+    expect(mocks.generateContent).toHaveBeenCalledTimes(3)
   })
 
   it("aborts after 25 seconds and throws GeminiBadOutputError", async () => {
@@ -206,4 +210,177 @@ describe("lib/gemini wrapper", () => {
       })
     ).rejects.toBeInstanceOf(GeminiBadOutputError)
   })
+
+  it("accepts YYYY-MM-DD due_date values and falls back non-ISO values to TBD", async () => {
+    mocks.generateContent.mockResolvedValueOnce({
+      text: JSON.stringify({
+        summary: "Test summary",
+        tasks: [
+          {
+            id: "t1",
+            title: "ISO due date task",
+            description: "Valid date",
+            task_type: "frontend",
+            weight: 1,
+            suggested_owner: "@Alice",
+            owner_uid: "u1",
+            due_date: "2026-11-28",
+            status: "todo",
+          },
+          {
+            id: "t2",
+            title: "Legacy due date task",
+            description: "Non-ISO date",
+            task_type: "backend",
+            weight: 2,
+            suggested_owner: "@Alice",
+            owner_uid: "u1",
+            due_date: "Nov 30",
+            status: "todo",
+          },
+        ],
+      }),
+    })
+
+    const result = await extractBoardWithGemini({
+      brief: "Do both tasks",
+      members: [{ uid: "u1", displayName: "Alice" }],
+      existingTitle: "Room",
+      todayIso: "2026-11-27",
+    })
+
+    expect(result.tasks[0]?.due_date).toBe("2026-11-28")
+    expect(result.tasks[1]?.due_date).toBe("TBD")
+  })
 })
+
+describe("Formula G6: callGenerateContent backoff, jitter, and budget", () => {
+  const originalKey = process.env.GEMINI_API_KEY
+
+  beforeEach(() => {
+    process.env.GEMINI_API_KEY = "test-key"
+    mocks.generateContent.mockReset()
+  })
+
+  afterEach(() => {
+    if (originalKey === undefined) {
+      delete process.env.GEMINI_API_KEY
+    } else {
+      process.env.GEMINI_API_KEY = originalKey
+    }
+  })
+
+  it("uses delays 500 and 1000 ms when random jitter is 0", async () => {
+    const delays: number[] = []
+    let nowMs = 1_000_000
+
+    mocks.generateContent
+      .mockRejectedValueOnce(new ApiError({ message: "Rate limit", status: 429 }))
+      .mockRejectedValueOnce(new ApiError({ message: "Unavailable", status: 503 }))
+      .mockResolvedValueOnce({ text: "ok" })
+
+    const res = await callGenerateContent({
+      contents: "hi",
+      maxOutputTokens: 300,
+      deps: {
+        now: () => nowMs,
+        randomJitterMs: () => 0,
+        sleep: async (ms) => {
+          delays.push(ms)
+          nowMs += ms
+        },
+      },
+    })
+
+    expect(res.text).toBe("ok")
+    expect(delays).toEqual([500, 1000])
+    expect(mocks.generateContent).toHaveBeenCalledTimes(3)
+    expect(computeGeminiRetryDelayMs(0, 0)).toBe(500)
+    expect(computeGeminiRetryDelayMs(1, 0)).toBe(1000)
+  })
+
+  it("uses delays 749 and 1249 ms when random jitter is 249", async () => {
+    const delays: number[] = []
+    let nowMs = 2_000_000
+
+    mocks.generateContent
+      .mockRejectedValueOnce(new ApiError({ message: "Rate limit", status: 429 }))
+      .mockRejectedValueOnce(new ApiError({ message: "Rate limit", status: 429 }))
+      .mockRejectedValueOnce(new ApiError({ message: "Rate limit", status: 429 }))
+
+    await expect(
+      callGenerateContent({
+        contents: "hi",
+        maxOutputTokens: 300,
+        deps: {
+          now: () => nowMs,
+          randomJitterMs: () => 249,
+          sleep: async (ms) => {
+            delays.push(ms)
+            nowMs += ms
+          },
+        },
+      })
+    ).rejects.toBeInstanceOf(GeminiQuotaError)
+
+    expect(delays).toEqual([749, 1249])
+    expect(mocks.generateContent).toHaveBeenCalledTimes(3)
+    expect(computeGeminiRetryDelayMs(0, 249)).toBe(749)
+    expect(computeGeminiRetryDelayMs(1, 249)).toBe(1249)
+  })
+
+  it("never retries a 400 error", async () => {
+    const delays: number[] = []
+    const badReq = new ApiError({ message: "Bad request", status: 400 })
+    mocks.generateContent.mockRejectedValueOnce(badReq)
+
+    await expect(
+      callGenerateContent({
+        contents: "hi",
+        maxOutputTokens: 300,
+        deps: {
+          now: () => 0,
+          randomJitterMs: () => 0,
+          sleep: async (ms) => {
+            delays.push(ms)
+          },
+        },
+      })
+    ).rejects.toBe(badReq)
+
+    expect(delays).toEqual([])
+    expect(mocks.generateContent).toHaveBeenCalledTimes(1)
+  })
+
+  it("stops retrying when remaining budget is below 5 s and caps per-attempt timeout", async () => {
+    expect(computeGeminiAttemptTimeoutMs(0)).toBe(25_000)
+    expect(computeGeminiAttemptTimeoutMs(20_000)).toBe(20_000)
+
+    const delays: number[] = []
+    let nowMs = 0
+
+    mocks.generateContent.mockImplementationOnce(async () => {
+      nowMs = 36_000 // only 4_000 ms remaining (< 5_000 ms)
+      throw new ApiError({ message: "Rate limit", status: 429 })
+    })
+
+    await expect(
+      callGenerateContent({
+        contents: "hi",
+        maxOutputTokens: 300,
+        deps: {
+          now: () => nowMs,
+          randomJitterMs: () => 0,
+          sleep: async (ms) => {
+            delays.push(ms)
+            nowMs += ms
+          },
+        },
+      })
+    ).rejects.toBeInstanceOf(GeminiQuotaError)
+
+    expect(delays).toEqual([])
+    expect(mocks.generateContent).toHaveBeenCalledTimes(1)
+  })
+})
+

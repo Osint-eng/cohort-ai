@@ -1,7 +1,7 @@
 import crypto from "node:crypto"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import firebaseConfig from "../firebase-applet-config.json"
-import { AuthVerificationError, verifyFirebaseIdToken } from "./server-firebase"
+import { AuthVerificationError, toFirestoreFields, verifyFirebaseIdToken } from "./server-firebase"
 
 const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -127,3 +127,35 @@ describe("verifyFirebaseIdToken", () => {
     expect((caught as AuthVerificationError).status).toBe(403)
   })
 })
+
+describe("toFirestoreFields", () => {
+  it("encodes nested nudgeState maps with timestampValue and integerValue", () => {
+    const at = new Date("2026-11-27T12:00:00.000Z")
+    const encoded = toFirestoreFields({
+      nudgeState: {
+        t1: {
+          at,
+          n: 1,
+        },
+      },
+    })
+
+    expect(encoded).toEqual({
+      nudgeState: {
+        mapValue: {
+          fields: {
+            t1: {
+              mapValue: {
+                fields: {
+                  at: { timestampValue: "2026-11-27T12:00:00.000Z" },
+                  n: { integerValue: "1" },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+  })
+})
+

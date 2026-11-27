@@ -148,4 +148,84 @@ describe("POST /api/cohort/pulse", () => {
       "tok_1"
     )
   })
+
+  it("skips snoozed overdue task, nudges second overdue task, and persists nudgeState in same commit", async () => {
+    mocks.fsGetDocumentWithMeta.mockResolvedValueOnce({
+      data: {
+        code: "ROOM1234",
+        title: "Capstone",
+        agentAggressiveness: "medium",
+        agentStatus: "watching",
+        nudgeState: {
+          t1: { at: "2026-11-26T06:10:00.000Z", n: 1 },
+          t_done: { at: "2026-11-26T06:10:00.000Z", n: 1 },
+        },
+        createdAt: "2026-11-20T00:00:00.000Z",
+      },
+      updateTime: "2026-11-27T07:00:00.000Z",
+    })
+    mocks.fsListCollection
+      .mockResolvedValueOnce([
+        {
+          docId: "t1",
+          data: {
+            id: "t1",
+            title: "Snoozed overdue task",
+            suggested_owner: "@Alice",
+            due_date: "2026-11-25",
+            status: "todo",
+          },
+        },
+        {
+          docId: "t2",
+          data: {
+            id: "t2",
+            title: "Eligible overdue task",
+            suggested_owner: "@Bob",
+            due_date: "2026-11-26",
+            status: "in_progress",
+          },
+        },
+        {
+          docId: "t_done",
+          data: {
+            id: "t_done",
+            title: "Completed task",
+            suggested_owner: "@Alice",
+            due_date: "2026-11-24",
+            status: "done",
+          },
+        },
+      ])
+      .mockResolvedValueOnce([{ docId: "user_1", data: { uid: "user_1", displayName: "Alice", role: "owner" } }])
+    mocks.fsRunQuery.mockResolvedValueOnce([])
+    mocks.enforceUserRateLimit.mockResolvedValueOnce(undefined)
+    mocks.generateProactiveNudgeWithGemini.mockResolvedValueOnce("Heads up on t2!")
+    mocks.fsCommit.mockResolvedValueOnce(undefined)
+
+    const req = new NextRequest("http://localhost:3000/api/cohort/pulse", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer tok_1",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ roomCode: "ROOM1234", tzOffsetMinutes: 0 }),
+    })
+
+    const res = await POST(req)
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body).toEqual({ ok: true, nudged: true, reason: "deadline_soon" })
+    const commitWrites = mocks.fsCommit.mock.calls[0]?.[0] as Array<{
+      data?: { nudgeState?: Record<string, { at: Date; n: number }> }
+      updateMaskFields?: string[]
+    }>
+    expect(commitWrites[0]?.updateMaskFields).toEqual(["agentStatus", "nudgeState"])
+    expect(Object.keys(commitWrites[0]?.data?.nudgeState || {}).sort()).toEqual(["t1", "t2"])
+    expect(commitWrites[0]?.data?.nudgeState?.t2).toEqual({
+      at: new Date(nowMs),
+      n: 1,
+    })
+  })
 })

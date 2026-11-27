@@ -17,6 +17,7 @@ import {
   generateCheckInWithGemini,
   generateCohortReplyWithGemini,
 } from "@/lib/gemini"
+import { getLocalTodayIso, normalizeTzOffsetMinutes } from "@/lib/proactive-cohort"
 
 const ROOM_CODE_REGEX = /^[A-Z0-9]{8}$/
 const MAX_TASKS_PER_ROOM = 40
@@ -92,7 +93,9 @@ export async function POST(req: NextRequest) {
       action?: unknown
       extractMode?: unknown
       replaceConfirmed?: unknown
+      tzOffsetMinutes?: unknown
     }
+    const tzOffsetMinutes = normalizeTzOffsetMinutes(body.tzOffsetMinutes)
 
     const roomCode = typeof body.roomCode === "string" ? body.roomCode.trim().toUpperCase() : ""
     if (!ROOM_CODE_REGEX.test(roomCode)) {
@@ -150,7 +153,7 @@ export async function POST(req: NextRequest) {
 
     const messageText = typeof body.messageText === "string" ? body.messageText.trim() : ""
     const action = typeof body.action === "string" ? body.action : ""
-    const todayIso = new Date().toISOString().slice(0, 10)
+    const todayIso = getLocalTodayIso(Date.now(), tzOffsetMinutes)
     const roomTitle = String(roomData.title || "Project room")
     const roomSummary = String(roomData.summary || "")
 
