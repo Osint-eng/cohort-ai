@@ -61,44 +61,44 @@ export async function verifyFirebaseIdToken(authHeader: string | null): Promise<
   }
   const idToken = authHeader.slice("Bearer ".length).trim()
   const parts = idToken.split(".")
-  if (parts.length !== 3) {
+  if (parts.length !== 3 || parts.some((part) => !part)) {
     throw new AuthVerificationError("Invalid JWT format", 401)
   }
 
   const [headerB64, payloadB64, sigB64] = parts
-  let header: { alg?: string; kid?: string }
+  let header: { alg?: unknown; kid?: unknown }
   let payload: {
-    aud?: string
-    iss?: string
-    sub?: string
-    exp?: number
-    iat?: number
-    email?: string
-    email_verified?: boolean
-    name?: string
-    picture?: string
+    aud?: unknown
+    iss?: unknown
+    sub?: unknown
+    exp?: unknown
+    iat?: unknown
+    email?: unknown
+    email_verified?: unknown
+    name?: unknown
+    picture?: unknown
   }
   try {
-    header = JSON.parse(base64UrlDecode(headerB64).toString("utf8")) as {
-      alg?: string
-      kid?: string
+    const parsedHeader: unknown = JSON.parse(base64UrlDecode(headerB64).toString("utf8"))
+    const parsedPayload: unknown = JSON.parse(base64UrlDecode(payloadB64).toString("utf8"))
+    if (
+      !parsedHeader ||
+      typeof parsedHeader !== "object" ||
+      Array.isArray(parsedHeader) ||
+      !parsedPayload ||
+      typeof parsedPayload !== "object" ||
+      Array.isArray(parsedPayload)
+    ) {
+      throw new AuthVerificationError("Invalid JWT format", 401)
     }
-    payload = JSON.parse(base64UrlDecode(payloadB64).toString("utf8")) as {
-      aud?: string
-      iss?: string
-      sub?: string
-      exp?: number
-      iat?: number
-      email?: string
-      email_verified?: boolean
-      name?: string
-      picture?: string
-    }
-  } catch {
+    header = parsedHeader as typeof header
+    payload = parsedPayload as typeof payload
+  } catch (err) {
+    if (err instanceof AuthVerificationError) throw err
     throw new AuthVerificationError("Invalid JWT format", 401)
   }
 
-  if (header.alg !== "RS256" || !header.kid) {
+  if (header.alg !== "RS256" || typeof header.kid !== "string" || !header.kid) {
     throw new AuthVerificationError("Unsupported JWT algorithm", 401)
   }
 
@@ -108,10 +108,15 @@ export async function verifyFirebaseIdToken(authHeader: string | null): Promise<
     throw new AuthVerificationError("Unknown JWT key ID", 401)
   }
 
-  const verifier = crypto.createVerify("RSA-SHA256")
-  verifier.update(`${headerB64}.${payloadB64}`)
-  verifier.end()
-  const isValid = verifier.verify(certPem, base64UrlDecode(sigB64))
+  let isValid = false
+  try {
+    const verifier = crypto.createVerify("RSA-SHA256")
+    verifier.update(`${headerB64}.${payloadB64}`)
+    verifier.end()
+    isValid = verifier.verify(certPem, base64UrlDecode(sigB64))
+  } catch {
+    throw new AuthVerificationError("Invalid Firebase ID token signature", 401)
+  }
   if (!isValid) {
     throw new AuthVerificationError("Invalid Firebase ID token signature", 401)
   }
@@ -121,10 +126,10 @@ export async function verifyFirebaseIdToken(authHeader: string | null): Promise<
   if (payload.aud !== firebaseConfig.projectId || payload.iss !== expectedIssuer) {
     throw new AuthVerificationError("Invalid token audience or issuer", 401)
   }
-  if (!payload.sub || typeof payload.sub !== "string") {
+  if (typeof payload.sub !== "string" || !payload.sub) {
     throw new AuthVerificationError("Missing token subject", 401)
   }
-  if (!payload.exp || nowSec >= payload.exp) {
+  if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp) || nowSec >= payload.exp) {
     throw new AuthVerificationError("Firebase ID token has expired", 401)
   }
   if (payload.email_verified !== true) {
@@ -134,14 +139,17 @@ export async function verifyFirebaseIdToken(authHeader: string | null): Promise<
     )
   }
 
-  const fallbackName = payload.email ? payload.email.split("@")[0] : "Teammate"
-  const displayName = (payload.name || fallbackName || "Teammate").trim().slice(0, 80)
+  const email = typeof payload.email === "string" ? payload.email : ""
+  const name = typeof payload.name === "string" ? payload.name : ""
+  const picture = typeof payload.picture === "string" ? payload.picture : ""
+  const fallbackName = email ? email.split("@")[0] : "Teammate"
+  const displayName = (name || fallbackName || "Teammate").trim().slice(0, 80)
 
   return {
     uid: payload.sub,
     displayName,
-    photoURL: (payload.picture || "").slice(0, 500),
-    email: payload.email || "",
+    photoURL: picture.slice(0, 500),
+    email,
     idToken,
   }
 }

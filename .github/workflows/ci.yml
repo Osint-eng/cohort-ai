@@ -23,10 +23,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Lint Firestore security rules
         run: pnpm run lint
@@ -34,5 +33,11 @@ jobs:
       - name: Typecheck TypeScript
         run: pnpm run typecheck
 
+      - name: Run unit tests
+        run: pnpm test
+
       - name: Build Next.js app
         run: pnpm run build
+
+      - name: Run Firestore security rules tests against emulator
+        run: pnpm dlx firebase-tools emulators:exec --only firestore --project cohort-security-test "pnpm run test:rules"

@@ -1,3 +1,4 @@
+import { describe, it } from 'vitest';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'fs';
 import { doc, getDoc, getDocs, collection, setDoc, updateDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
@@ -89,3 +90,9 @@ export async function runSecurityAudit() {
 
   await testEnv.cleanup();
 }
+
+describe('firestore.rules security audit', () => {
+  it('enforces all Dirty Dozen security invariants against Firestore emulator', async () => {
+    await runSecurityAudit();
+  }, 30_000);
+});

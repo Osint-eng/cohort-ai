@@ -65,7 +65,7 @@ security_spec.md            # Security invariants and adversarial test cases
 
 ## Prerequisites
 
-- **Node.js 22+** and **npm**
+- **Node.js 22+** and **pnpm**
 - A **Firebase project** with:
   - **Authentication** enabled (Google sign-in provider)
   - **Cloud Firestore** database created
@@ -93,7 +93,7 @@ Update `firebase-applet-config.json` in the project root with your own Firebase 
 1. **Install dependencies**
 
    ```bash
-   npm install
+   pnpm install
    ```
 
 2. **Configure environment variables**
@@ -102,11 +102,11 @@ Update `firebase-applet-config.json` in the project root with your own Firebase 
    cp .env.example .env.local
    ```
 
-   Add your `GEMINI_API_KEY` to `.env.local` and ensure `firebase-applet-config.json` points to your Firebase project.
+   Add your `GEMINI_API_KEY` (and `GEMINI_MODEL` when running outside AI Studio) to `.env.local`, and ensure `firebase-applet-config.json` points to your Firebase project.
 
 3. **Deploy Firestore rules**
 
-   Deploy `firestore.rules` to your Firebase project (for example via Firebase CLI):
+   Deploy `firestore.rules` to your Firebase project using `firebase.json` and the Firebase CLI:
 
    ```bash
    firebase deploy --only firestore:rules
@@ -115,7 +115,7 @@ Update `firebase-applet-config.json` in the project root with your own Firebase 
 4. **Start the development server**
 
    ```bash
-   npm run dev
+   pnpm run dev
    ```
 
    Open [http://localhost:3000](http://localhost:3000).
@@ -124,10 +124,13 @@ Update `firebase-applet-config.json` in the project root with your own Firebase 
 
 ## Available Scripts
 
-- `npm run dev` — Starts Next.js development server on `0.0.0.0:3000`
-- `npm run build` — Builds the production application (`output: 'standalone'`)
-- `npm run start` — Starts the production Next.js server
-- `npm run lint` — Runs ESLint against `firestore.rules` using `@firebase/eslint-plugin-security-rules`
+- `pnpm run dev` — Starts Next.js development server on `0.0.0.0:3000`
+- `pnpm run build` — Builds the production application (`output: 'standalone'`)
+- `pnpm run start` — Starts the production Next.js server
+- `pnpm run typecheck` — Runs strict TypeScript checks (`tsc --noEmit`)
+- `pnpm run lint` — Runs ESLint against `firestore.rules` using `@firebase/eslint-plugin-security-rules`
+- `pnpm test` — Runs the Vitest unit test suite
+- `pnpm run test:rules` — Runs `firestore.rules.test.ts` against a running Firestore emulator (`firebase emulators:exec --only firestore --project cohort-security-test "pnpm run test:rules"`)
 
 ---
 
