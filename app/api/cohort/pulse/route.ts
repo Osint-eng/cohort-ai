@@ -7,11 +7,16 @@ import {
   fsGetDocument,
   fsGetDocumentWithMeta,
   fsListCollection,
+  fsRunQuery,
   verifyFirebaseIdToken,
 } from "@/lib/server-firebase"
 import { enforceUserRateLimit, RateLimitError } from "@/lib/rate-limit"
 import { generateProactiveNudgeWithGemini } from "@/lib/gemini"
-import { evaluateProactiveNudge, normalizeAggressiveness } from "@/lib/proactive-cohort"
+import {
+  evaluateProactiveNudge,
+  normalizeAggressiveness,
+  PROACTIVE_THRESHOLDS,
+} from "@/lib/proactive-cohort"
 
 const ROOM_CODE_REGEX = /^[A-Z0-9]{8}$/
 
@@ -43,11 +48,31 @@ export async function POST(req: NextRequest) {
 
     const roomData = roomWithMeta.data
     const aggressiveness = normalizeAggressiveness(roomData.agentAggressiveness)
+    const lastProactiveAtIso =
+      typeof roomData.lastProactiveAt === "string" ? roomData.lastProactiveAt : undefined
+
+    if (lastProactiveAtIso) {
+      const lastProactiveMs = Date.parse(lastProactiveAtIso)
+      if (
+        !Number.isNaN(lastProactiveMs) &&
+        Date.now() - lastProactiveMs < PROACTIVE_THRESHOLDS[aggressiveness].cooldownMs
+      ) {
+        return NextResponse.json({ ok: true, nudged: false })
+      }
+    }
 
     const [taskDocs, memberDocs, messageDocs] = await Promise.all([
       fsListCollection(`rooms/${roomCode}/tasks`, user.idToken),
       fsListCollection(`rooms/${roomCode}/members`, user.idToken),
-      fsListCollection(`rooms/${roomCode}/messages`, user.idToken),
+      fsRunQuery(
+        {
+          parentPath: `rooms/${roomCode}`,
+          collectionId: "messages",
+          orderBy: [{ fieldPath: "createdAt", direction: "DESCENDING" }],
+          limit: 1,
+        },
+        user.idToken
+      ),
     ])
 
     const tasks = taskDocs.map((d) => ({
@@ -74,7 +99,7 @@ export async function POST(req: NextRequest) {
 
     const evaluation = evaluateProactiveNudge({
       aggressiveness,
-      lastProactiveAtIso: typeof roomData.lastProactiveAt === "string" ? roomData.lastProactiveAt : undefined,
+      lastProactiveAtIso,
       roomCreatedAtIso: typeof roomData.createdAt === "string" ? roomData.createdAt : undefined,
       tasks,
       messages,

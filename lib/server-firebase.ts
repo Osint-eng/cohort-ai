@@ -257,6 +257,63 @@ export async function fsListCollection(
   return (json.documents || []).map(decodeFirestoreDoc)
 }
 
+export interface RunQueryOptions {
+  parentPath?: string
+  collectionId: string
+  orderBy?: Array<{ fieldPath: string; direction?: "ASCENDING" | "DESCENDING" }>
+  limit?: number
+}
+
+export async function fsRunQuery(
+  options: RunQueryOptions,
+  idToken: string
+): Promise<Array<{ docId: string; data: Record<string, unknown> }>> {
+  const cleanParent = (options.parentPath || "").replace(/^\/+|\/+$/g, "")
+  const url = cleanParent
+    ? `${FIRESTORE_BASE_URL}/${cleanParent}:runQuery`
+    : `${FIRESTORE_BASE_URL}:runQuery`
+
+  const structuredQuery: Record<string, unknown> = {
+    from: [{ collectionId: options.collectionId }],
+  }
+  if (options.orderBy?.length) {
+    structuredQuery.orderBy = options.orderBy.map((o) => ({
+      field: { fieldPath: o.fieldPath },
+      direction: o.direction || "ASCENDING",
+    }))
+  }
+  if (typeof options.limit === "number") {
+    structuredQuery.limit = options.limit
+  }
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ structuredQuery }),
+    cache: "no-store",
+  })
+
+  if (res.status === 404) return []
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Firestore RUN_QUERY ${options.collectionId} failed (${res.status}): ${text}`)
+  }
+
+  const rows = (await res.json()) as Array<{
+    document?: { name: string; fields?: Record<string, FirestoreValue> }
+  }>
+
+  return rows
+    .filter(
+      (row): row is { document: { name: string; fields?: Record<string, FirestoreValue> } } =>
+        Boolean(row.document)
+    )
+    .map((row) => decodeFirestoreDoc(row.document))
+}
+
 export interface CommitWriteOp {
   type: "create" | "set" | "update" | "delete"
   path: string
