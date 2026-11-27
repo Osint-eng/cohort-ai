@@ -1,4 +1,4 @@
-import type { LogEntry, Member, Task } from "./api"
+import { normalizeTaskWeight, type LogEntry, type Member, type Task } from "./api"
 
 export const INACTIVE_THRESHOLD_HOURS = 48
 
@@ -56,6 +56,9 @@ export type FairnessReport = {
   timeline: LogEntry[]
 }
 
+const OTHER_ACTION_POINTS = 0.5
+const MAX_OTHER_ACTION_POINTS = 2
+
 function matchTaskOwnerUid(task: Task, members: Member[]): string {
   if (task.owner_uid && members.some((m) => m.uid === task.owner_uid)) {
     return task.owner_uid
@@ -100,9 +103,11 @@ export function computeFairnessReport(input: {
     (log) => log.actorId && log.actorId !== "cohort" && log.actor !== "cohort"
   )
 
+  const taskWeightById = new Map<string, 1 | 2 | 3>()
   const tasksByUid = new Map<string, Task[]>()
   let unassignedTasksCount = 0
   for (const task of input.tasks) {
+    taskWeightById.set(task.id, normalizeTaskWeight(task.weight) ?? 1)
     const uid = matchTaskOwnerUid(task, approvedMembers)
     if (!uid) {
       unassignedTasksCount += 1
@@ -113,11 +118,77 @@ export function computeFairnessReport(input: {
     tasksByUid.set(uid, list)
   }
 
+  // Sort chronologically (oldest first) so the earliest 'completed' / 'started'
+  // log per task_id earns credit regardless of Firestore's descending query order.
+  const chronologicalLogs = humanLogs
+    .map((log, index) => ({ log, index, ms: parseIsoMs(log.ts) }))
+    .sort((a, b) => {
+      if (a.ms !== null && b.ms !== null && a.ms !== b.ms) {
+        return a.ms - b.ms
+      }
+      if (a.ms !== null && b.ms === null) return -1
+      if (a.ms === null && b.ms !== null) return 1
+      return a.index - b.index
+    })
+    .map((entry) => entry.log)
+
+  const firstCompletedTaskIds = new Set<string>()
+  const firstStartedTaskIds = new Set<string>()
+  const firstBlockedByActorTask = new Set<string>()
+
+  const completionPointsByUid = new Map<string, number>()
+  const startPointsByUid = new Map<string, number>()
+  const otherPointsByUid = new Map<string, number>()
   const logsByUid = new Map<string, LogEntry[]>()
+
   for (const log of humanLogs) {
     const list = logsByUid.get(log.actorId) || []
     list.push(log)
     logsByUid.set(log.actorId, list)
+  }
+
+  for (const log of chronologicalLogs) {
+    const action = log.action.trim().toLowerCase()
+    const taskKey = log.task_id || log.id
+
+    if (action === "completed") {
+      if (!firstCompletedTaskIds.has(taskKey)) {
+        firstCompletedTaskIds.add(taskKey)
+        const weight = taskWeightById.get(log.task_id) ?? 1
+        completionPointsByUid.set(
+          log.actorId,
+          (completionPointsByUid.get(log.actorId) || 0) + 3 * weight
+        )
+      }
+      continue
+    }
+
+    if (action === "started") {
+      if (!firstStartedTaskIds.has(taskKey)) {
+        firstStartedTaskIds.add(taskKey)
+        startPointsByUid.set(log.actorId, (startPointsByUid.get(log.actorId) || 0) + 1)
+      }
+      continue
+    }
+
+    // Status reset toggles add nothing to prevent toggling done <-> todo for points
+    if (action === "moved to to do" || action === "todo") {
+      continue
+    }
+
+    // Prevent repeated blocked toggles on the same task by the same actor from farming points
+    if (action === "blocked") {
+      const blockedKey = `${log.actorId}::${taskKey}`
+      if (firstBlockedByActorTask.has(blockedKey)) {
+        continue
+      }
+      firstBlockedByActorTask.add(blockedKey)
+    }
+
+    otherPointsByUid.set(
+      log.actorId,
+      (otherPointsByUid.get(log.actorId) || 0) + OTHER_ACTION_POINTS
+    )
   }
 
   const rawRows = approvedMembers.map((member) => {
@@ -153,6 +224,14 @@ export function computeFairnessReport(input: {
       }
     }
 
+    const completionPoints = completionPointsByUid.get(member.uid) || 0
+    const startPoints = startPointsByUid.get(member.uid) || 0
+    const otherPoints = Math.min(
+      MAX_OTHER_ACTION_POINTS,
+      otherPointsByUid.get(member.uid) || 0
+    )
+    const points = Number((completionPoints + startPoints + otherPoints).toFixed(1))
+
     const lastSeenMs = parseIsoMs(member.lastSeenAt)
     const activityRefMs = latestLogMs ?? lastSeenMs
     const inactiveHours =
@@ -163,14 +242,8 @@ export function computeFairnessReport(input: {
     const hasRoomWork = input.tasks.length > 0 || humanLogs.length > 0
     const isInactive =
       hasRoomWork &&
-      ((latestLogMs === null && completedCount === 0 && inProgressCount === 0 && (inactiveHours ?? 0) >= 1) ||
+      ((latestLogMs === null && points === 0 && (inactiveHours ?? 0) >= 1) ||
         (latestLogMs !== null && (nowMs - latestLogMs) / 3_600_000 >= INACTIVE_THRESHOLD_HOURS))
-
-    // Transparent contribution points:
-    // +3 per completed task, +1 per active in-progress task, +0.5 per logged update (capped at 15)
-    const points = Number(
-      (completedCount * 3 + inProgressCount * 1 + Math.min(memberLogs.length, 15) * 0.5).toFixed(1)
-    )
 
     return {
       member,
@@ -217,7 +290,7 @@ export function computeFairnessReport(input: {
     }
   })
 
-  members.sort((a, b) => b.points - a.points || b.completedCount - a.completedCount)
+  members.sort((a, b) => b.points - a.points || b.completionsLogged - a.completionsLogged)
 
   // Jain's Fairness Index: (sum x_i)^2 / (n * sum x_i^2) scaled to 0..100
   let fairnessScore: number | null = null

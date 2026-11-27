@@ -11,7 +11,11 @@ import {
   verifyFirebaseIdToken,
 } from "@/lib/server-firebase"
 import { enforceUserRateLimit, RateLimitError } from "@/lib/rate-limit"
-import { generateProactiveNudgeWithGemini } from "@/lib/gemini"
+import {
+  GeminiBadOutputError,
+  GeminiQuotaError,
+  generateProactiveNudgeWithGemini,
+} from "@/lib/gemini"
 import {
   evaluateProactiveNudge,
   normalizeAggressiveness,
@@ -188,6 +192,12 @@ export async function POST(req: NextRequest) {
         { error: error.message },
         { status: 429, headers: { "Retry-After": String(error.retryAfterSeconds) } }
       )
+    }
+    if (error instanceof GeminiQuotaError) {
+      return NextResponse.json({ error: error.message }, { status: 429 })
+    }
+    if (error instanceof GeminiBadOutputError) {
+      return NextResponse.json({ error: error.message }, { status: 502 })
     }
     if (error instanceof AuthVerificationError) {
       return NextResponse.json({ error: error.message }, { status: error.status })

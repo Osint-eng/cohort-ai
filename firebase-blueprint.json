@@ -196,6 +196,10 @@
           "enum": ["frontend", "backend", "design", "research", "general"],
           "description": "Detected or classified discipline for the task."
         },
+        "weight": {
+          "type": "integer",
+          "description": "Optional effort weight from 1 to 3."
+        },
         "suggested_owner": {
           "type": "string",
           "minLength": 1,

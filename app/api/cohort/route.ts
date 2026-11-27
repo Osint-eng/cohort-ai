@@ -5,11 +5,18 @@ import {
   fsCommit,
   fsGetDocument,
   fsListCollection,
+  fsRunQuery,
   verifyFirebaseIdToken,
   type CommitWriteOp,
 } from "@/lib/server-firebase"
 import { enforceUserRateLimit, RateLimitError } from "@/lib/rate-limit"
-import { extractBoardWithGemini, generateCheckInWithGemini } from "@/lib/gemini"
+import {
+  extractBoardWithGemini,
+  GeminiBadOutputError,
+  GeminiQuotaError,
+  generateCheckInWithGemini,
+  generateCohortReplyWithGemini,
+} from "@/lib/gemini"
 
 const ROOM_CODE_REGEX = /^[A-Z0-9]{8}$/
 const MAX_TASKS_PER_ROOM = 40
@@ -21,6 +28,8 @@ function makeId(prefix: string): string {
 type TaskDoc = {
   id: string
   title: string
+  description?: string
+  weight?: 1 | 2 | 3
   suggested_owner: string
   owner_uid: string
   due_date: string
@@ -114,6 +123,15 @@ export async function POST(req: NextRequest) {
     const tasks: TaskDoc[] = taskDocs.map((d) => ({
       id: String(d.data.id || d.docId),
       title: String(d.data.title || ""),
+      description:
+        typeof d.data.description === "string" && d.data.description ? d.data.description : undefined,
+      weight:
+        typeof d.data.weight === "number" &&
+        Number.isInteger(d.data.weight) &&
+        d.data.weight >= 1 &&
+        d.data.weight <= 3
+          ? (d.data.weight as 1 | 2 | 3)
+          : undefined,
       suggested_owner: String(d.data.suggested_owner || "@Team"),
       owner_uid: String(d.data.owner_uid || ""),
       due_date: String(d.data.due_date || "TBD"),
@@ -134,6 +152,7 @@ export async function POST(req: NextRequest) {
     const action = typeof body.action === "string" ? body.action : ""
     const todayIso = new Date().toISOString().slice(0, 10)
     const roomTitle = String(roomData.title || "Project room")
+    const roomSummary = String(roomData.summary || "")
 
     // 1. Extract board from brief (via modal action="extract" OR chat "@cohort extract <brief>")
     const extractMatch = messageText.match(/@cohort\s+extract(?:\s*[:\-]?\s*([\s\S]+))?$/i)
@@ -186,7 +205,7 @@ export async function POST(req: NextRequest) {
         return Math.max(max, num)
       }, 0)
       const roomNextNum = typeof roomData.nextTaskNumber === "number" ? roomData.nextTaskNumber : 1
-      const startTaskNumber = isReplace ? 1 : Math.max(roomNextNum, maxExistingNum + 1)
+      const startTaskNumber = Math.max(roomNextNum, maxExistingNum + 1)
 
       if (!isReplace && tasks.length >= MAX_TASKS_PER_ROOM) {
         return NextResponse.json(
@@ -218,21 +237,19 @@ export async function POST(req: NextRequest) {
         throw err
       }
 
-      if (isReplace && taskDocs.length > 0) {
-        await fsCommit(
-          taskDocs.map((t) => ({
-            type: "delete" as const,
-            path: `rooms/${roomCode}/tasks/${t.docId}`,
-          })),
-          user.idToken
-        )
-      }
-
-      const nextTaskNumber = Math.min(200, startTaskNumber + extracted.tasks.length)
+      const nextTaskNumber = Math.min(1000, startTaskNumber + extracted.tasks.length)
       const msgId = makeId("msg")
       const logId = makeId("log")
       const actionVerb = isReplace && hasExistingTasks ? "replaced" : "added"
+      const deleteWrites: CommitWriteOp[] =
+        isReplace && taskDocs.length > 0
+          ? taskDocs.map((t) => ({
+              type: "delete" as const,
+              path: `rooms/${roomCode}/tasks/${t.docId}`,
+            }))
+          : []
       const writes: CommitWriteOp[] = [
+        ...deleteWrites,
         {
           type: "update",
           path: `rooms/${roomCode}`,
@@ -252,8 +269,9 @@ export async function POST(req: NextRequest) {
             title: task.title,
             ...(task.description ? { description: task.description } : {}),
             task_type: task.task_type,
+            weight: task.weight,
             suggested_owner: task.suggested_owner,
-            owner_uid: resolveMemberUid(task.suggested_owner, members),
+            owner_uid: task.owner_uid || resolveMemberUid(task.suggested_owner, members),
             due_date: task.due_date,
             status: task.status,
             updatedBy: user.uid,
@@ -293,7 +311,12 @@ export async function POST(req: NextRequest) {
         },
       ]
 
-      await fsCommit(writes, user.idToken)
+      try {
+        await fsCommit(writes, user.idToken)
+      } catch (err) {
+        await setAgentStatus(roomCode, "watching", user.idToken)
+        throw err
+      }
       return NextResponse.json({
         ok: true,
         mode: isReplace ? "replace" : "merge",
@@ -479,26 +502,100 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    // 5. Help or general @cohort mention
-    const msgId = makeId("msg")
-    await fsCommit(
-      [
-        {
-          type: "create",
-          path: `rooms/${roomCode}/messages/${msgId}`,
-          data: {
-            id: msgId,
-            senderId: "cohort",
-            triggeredBy: user.uid,
-            senderName: "cohort",
-            role: "assistant",
-            text: 'Commands: "@cohort extract <brief>" to add tasks to your board, "@cohort check-in" for an overdue/blocked summary, "@cohort mark t1 complete", "@cohort mark t2 blocked because <reason>", or "@cohort list".',
+    // 5. Fixed help text for @cohort help only
+    if (/^\s*@cohort\s+help\s*$/i.test(messageText)) {
+      const msgId = makeId("msg")
+      await fsCommit(
+        [
+          {
+            type: "create",
+            path: `rooms/${roomCode}/messages/${msgId}`,
+            data: {
+              id: msgId,
+              senderId: "cohort",
+              triggeredBy: user.uid,
+              senderName: "cohort",
+              role: "assistant",
+              text: 'Commands: "@cohort extract <brief>" to add tasks to your board, "@cohort check-in" for an overdue/blocked summary, "@cohort mark t1 complete", "@cohort mark t2 blocked because <reason>", or "@cohort list".',
+            },
+            serverTimestampFields: ["createdAt"],
           },
-          serverTimestampFields: ["createdAt"],
+        ],
+        user.idToken
+      )
+      return NextResponse.json({ ok: true })
+    }
+
+    if (!messageText) {
+      return NextResponse.json({ error: "Message text is required" }, { status: 400 })
+    }
+
+    // 6. General @cohort Q&A using recent room messages and Gemini
+    let replyText: string
+    await setAgentStatus(roomCode, "thinking", user.idToken)
+    try {
+      const recentMessageDocs = await fsRunQuery(
+        {
+          parentPath: `rooms/${roomCode}`,
+          collectionId: "messages",
+          orderBy: [{ fieldPath: "createdAt", direction: "DESCENDING" }],
+          limit: 12,
         },
-      ],
-      user.idToken
-    )
+        user.idToken
+      )
+
+      const recentMessages = [...recentMessageDocs].reverse().map((d) => ({
+        senderName: String(d.data.senderName || "Teammate"),
+        role: String(d.data.role || "user"),
+        text: String(d.data.text || "").slice(0, 1000),
+        createdAt: typeof d.data.createdAt === "string" ? d.data.createdAt : undefined,
+      }))
+
+      replyText = await generateCohortReplyWithGemini({
+        roomTitle,
+        roomSummary,
+        tasks,
+        members,
+        messages: recentMessages,
+        question: messageText,
+        todayIso,
+      })
+    } catch (err) {
+      await setAgentStatus(roomCode, "watching", user.idToken)
+      throw err
+    }
+
+    const msgId = makeId("msg")
+    try {
+      await fsCommit(
+        [
+          {
+            type: "update",
+            path: `rooms/${roomCode}`,
+            data: { agentStatus: "watching" },
+            serverTimestampFields: ["agentStatusAt", "updatedAt"],
+            updateMaskFields: ["agentStatus"],
+          },
+          {
+            type: "create",
+            path: `rooms/${roomCode}/messages/${msgId}`,
+            data: {
+              id: msgId,
+              senderId: "cohort",
+              triggeredBy: user.uid,
+              senderName: "cohort",
+              role: "assistant",
+              text: replyText,
+            },
+            serverTimestampFields: ["createdAt"],
+          },
+        ],
+        user.idToken
+      )
+    } catch (err) {
+      await setAgentStatus(roomCode, "watching", user.idToken)
+      throw err
+    }
     return NextResponse.json({ ok: true })
   } catch (error) {
     console.error("[/api/cohort] Request failed:", {
@@ -512,19 +609,23 @@ export async function POST(req: NextRequest) {
         { status: 429, headers: { "Retry-After": String(error.retryAfterSeconds) } }
       )
     }
+    if (error instanceof GeminiQuotaError) {
+      return NextResponse.json({ error: error.message }, { status: 429 })
+    }
+    if (error instanceof GeminiBadOutputError) {
+      return NextResponse.json({ error: error.message }, { status: 502 })
+    }
     if (error instanceof AuthVerificationError) {
       return NextResponse.json({ error: error.message }, { status: error.status })
     }
     const message = error instanceof Error ? error.message : "Cohort command failed"
     const lower = message.toLowerCase()
     const status =
-      lower.includes("token") || lower.includes("auth")
-        ? 401
-        : lower.includes("permission") || lower.includes("permission_denied")
-          ? 403
-          : lower.includes("not found")
-            ? 404
-            : 500
+      lower.includes("permission") || lower.includes("permission_denied")
+        ? 403
+        : lower.includes("not found")
+          ? 404
+          : 500
     return NextResponse.json({ error: message }, { status })
   }
 }

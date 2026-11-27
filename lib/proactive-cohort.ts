@@ -111,6 +111,55 @@ export function parseTaskDueDate(dueDateStr: string, nowMs = Date.now()): Date |
   return Number.isNaN(fallback) ? null : new Date(fallback)
 }
 
+export function formatTaskDueDateDisplay(dueDateStr: string, nowMs = Date.now()): string {
+  const clean = dueDateStr.trim()
+  if (!clean || /^tbd$/i.test(clean)) return "TBD"
+
+  const isoMatch = clean.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (isoMatch) {
+    const year = Number(isoMatch[1])
+    const month = Number(isoMatch[2]) - 1
+    const day = Number(isoMatch[3])
+    const dt = new Date(year, month, day, 12, 0, 0)
+    if (
+      !Number.isNaN(dt.getTime()) &&
+      dt.getFullYear() === year &&
+      dt.getMonth() === month &&
+      dt.getDate() === day
+    ) {
+      const currentYear = new Date(nowMs).getFullYear()
+      return new Intl.DateTimeFormat("en-US", {
+        month: "short",
+        day: "numeric",
+        ...(year !== currentYear ? { year: "numeric" } : {}),
+      }).format(dt)
+    }
+  }
+
+  return clean
+}
+
+export function toDueDateInputValue(dueDateStr: string, nowMs = Date.now()): string {
+  const clean = dueDateStr.trim()
+  if (!clean || /^tbd$/i.test(clean)) return ""
+  if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean
+
+  const parsed = parseTaskDueDate(clean, nowMs)
+  if (!parsed) return ""
+  const y = parsed.getFullYear()
+  const m = String(parsed.getMonth() + 1).padStart(2, "0")
+  const d = String(parsed.getDate()).padStart(2, "0")
+  return `${y}-${m}-${d}`
+}
+
+export function getTodayDateInputValue(nowMs = Date.now()): string {
+  const dt = new Date(nowMs)
+  const y = dt.getFullYear()
+  const m = String(dt.getMonth() + 1).padStart(2, "0")
+  const d = String(dt.getDate()).padStart(2, "0")
+  return `${y}-${m}-${d}`
+}
+
 export interface ProactiveEvaluationInput {
   aggressiveness: AgentAggressiveness
   lastProactiveAtIso?: string

@@ -80,6 +80,7 @@ Create a `.env.local` file in the project root (see `.env.example`):
 | Variable | Required | Scope | Description |
 | --- | --- | --- | --- |
 | `GEMINI_API_KEY` | Yes | Server-only | API key used by `lib/gemini.ts` inside Next.js API routes. Never expose with `NEXT_PUBLIC_`. |
+| `GEMINI_MODEL` | Outside AI Studio | Server-only | `GEMINI_MODEL` must be set outside AI Studio (for example `gemini-2.5-flash`); defaults to `gemini-4-hydrogen`. |
 | `FIREBASE_API_KEY` | Optional* | Reference | Documented in `.env.example`; client/server Firebase settings are currently loaded from `firebase-applet-config.json`. |
 
 \* **Firebase Configuration (`firebase-applet-config.json`):**  

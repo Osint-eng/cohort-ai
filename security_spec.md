@@ -20,7 +20,7 @@
    - `createdAt`, `joinedAt`, `updatedAt`, `lastSeenAt`, `agentStatusAt`, and `lastProactiveAt` must equal `request.time` on creation/update.
    - `ownerId`, `code`, `createdAt`, `joinedAt`, `uid`, `createdBy` are immutable after creation.
    - `agentAggressiveness` (`low` | `medium` | `high`) may only be updated by the room owner.
-8. **Strict Schemas, Board Caps & Rate Limits**: Every document write validates exact required/allowed keys (`hasAll` + `hasOnly`), types, enums (`status`, `task_type` in `["frontend", "backend", "design", "research", "general"]`), ID patterns, string length limits (`description <= 500`), a room task sequence cap (`nextTaskNumber <= 200`), and per-user sliding-window counters at `/rateLimits/{userId}` (10 rooms / 20 AI commands per 10 minutes).
+8. **Strict Schemas, Board Caps & Rate Limits**: Every document write validates exact required/allowed keys (`hasAll` + `hasOnly`), types, enums (`status`, `task_type` in `["frontend", "backend", "design", "research", "general"]`), optional integer task `weight` (`1..3`), ID patterns, string length limits (`description <= 500`), a room task sequence cap (`nextTaskNumber <= 1000`), and per-user fixed 10-minute window counters persisted at `/rateLimits/{userId}` (10 rooms / 20 AI commands per 10 minutes, guarded by `request.time` window-reset rules and `ifMatchUpdateTime` optimistic concurrency).
 
 ## 2. The "Dirty Dozen" Payloads (Adversarial Tests)
 1. **Unauthenticated Room Read/Write**: Unauthenticated user tries to read `/rooms/ABCD1234` -> `PERMISSION_DENIED`.

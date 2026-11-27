@@ -1,4 +1,10 @@
-import { GoogleGenAI, Type } from "@google/genai"
+import {
+  ApiError,
+  GoogleGenAI,
+  Type,
+  type GenerateContentConfig,
+  type GenerateContentResponse,
+} from "@google/genai"
 import {
   detectTaskType,
   type SandboxFiles,
@@ -7,6 +13,26 @@ import {
 } from "./task-sandbox"
 
 const MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-4-hydrogen"
+const GEMINI_TIMEOUT_MS = 25_000
+const GEMINI_RETRY_DELAY_MS = 600
+
+export class GeminiQuotaError extends Error {
+  constructor(
+    message = "@cohort hit Gemini's rate limit right now. Please wait a moment and try again."
+  ) {
+    super(message)
+    this.name = "GeminiQuotaError"
+  }
+}
+
+export class GeminiBadOutputError extends Error {
+  constructor(
+    message = "@cohort received an invalid or incomplete response from Gemini. Please try again."
+  ) {
+    super(message)
+    this.name = "GeminiBadOutputError"
+  }
+}
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY
@@ -23,12 +49,84 @@ function getGeminiClient(): GoogleGenAI {
   })
 }
 
+function getGeminiErrorStatus(error: unknown): number | undefined {
+  if (error instanceof ApiError) {
+    return error.status
+  }
+  if (error && typeof error === "object") {
+    const rec = error as { status?: unknown; statusCode?: unknown; code?: unknown }
+    if (typeof rec.status === "number") return rec.status
+    if (typeof rec.statusCode === "number") return rec.statusCode
+    if (typeof rec.code === "number") return rec.code
+  }
+  const msg = error instanceof Error ? error.message : String(error)
+  if (/\b429\b|RESOURCE_EXHAUSTED/i.test(msg)) return 429
+  if (/\b503\b|UNAVAILABLE/i.test(msg)) return 503
+  return undefined
+}
+
+async function callGenerateContent(params: {
+  contents: string
+  config?: GenerateContentConfig
+  maxOutputTokens: number
+}): Promise<GenerateContentResponse> {
+  const ai = getGeminiClient()
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => {
+      controller.abort(new Error("Gemini request timed out"))
+    }, GEMINI_TIMEOUT_MS)
+
+    try {
+      return await ai.models.generateContent({
+        model: MODEL,
+        contents: params.contents,
+        config: {
+          ...params.config,
+          maxOutputTokens: params.maxOutputTokens,
+          abortSignal: controller.signal,
+        },
+      })
+    } catch (error) {
+      if (
+        controller.signal.aborted ||
+        (error instanceof Error && error.name === "AbortError")
+      ) {
+        throw new GeminiBadOutputError(
+          "@cohort took too long to hear back from Gemini. Please try again."
+        )
+      }
+      const status = getGeminiErrorStatus(error)
+      if ((status === 429 || status === 503) && attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, GEMINI_RETRY_DELAY_MS))
+        continue
+      }
+      if (status === 429) {
+        throw new GeminiQuotaError()
+      }
+      if (status === 503 || (typeof status === "number" && status >= 500)) {
+        throw new GeminiBadOutputError(
+          "Gemini is temporarily unavailable. Please try again in a moment."
+        )
+      }
+      throw error
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  }
+
+  throw new GeminiBadOutputError()
+}
+
 export type ExtractedTask = {
   id: string
   title: string
   description: string
   task_type: TaskType
+  weight: 1 | 2 | 3
   suggested_owner: string
+  owner_uid: string
   due_date: string
   status: "todo" | "in_progress" | "blocked" | "done"
 }
@@ -40,6 +138,38 @@ export type ExtractedBoardResult = {
 
 const VALID_STATUSES = new Set(["todo", "in_progress", "blocked", "done"])
 
+function buildUniqueMemberHandles(
+  members: Array<{ uid: string; displayName: string }>
+): Array<{ uid: string; handle: string }> {
+  const firstNameCounts = new Map<string, number>()
+  const parsed = members.map((m) => {
+    const parts = m.displayName.trim().split(/\s+/).filter(Boolean)
+    const first = parts[0] || "Member"
+    const lastInitial = parts.length > 1 ? parts[parts.length - 1][0] || "" : ""
+    const key = first.toLowerCase()
+    firstNameCounts.set(key, (firstNameCounts.get(key) || 0) + 1)
+    return { uid: m.uid, first, lastInitial, key }
+  })
+
+  const usedHandles = new Set<string>(["@unassigned"])
+  return parsed.map(({ uid, first, lastInitial, key }) => {
+    const hasDuplicateFirst = (firstNameCounts.get(key) || 0) > 1
+    const base =
+      hasDuplicateFirst && lastInitial
+        ? `@${first}${lastInitial.toUpperCase()}`
+        : `@${first}`
+    const truncatedBase = base.slice(0, 76)
+    let candidate = truncatedBase
+    let suffix = 2
+    while (usedHandles.has(candidate.toLowerCase())) {
+      candidate = `${truncatedBase}${suffix}`.slice(0, 80)
+      suffix += 1
+    }
+    usedHandles.add(candidate.toLowerCase())
+    return { uid, handle: candidate }
+  })
+}
+
 export async function extractBoardWithGemini(input: {
   brief: string
   members: Array<{ uid: string; displayName: string }>
@@ -49,13 +179,16 @@ export async function extractBoardWithGemini(input: {
   maxTasks?: number
   existingTasks?: Array<{ id: string; title: string; status: string }>
 }): Promise<ExtractedBoardResult> {
-  const ai = getGeminiClient()
   const startNumber = Math.max(1, input.startTaskNumber ?? 1)
   const maxTasks = Math.max(1, Math.min(12, input.maxTasks ?? 8))
-  const memberHandles =
-    input.members.length > 0
-      ? input.members.map((m) => `@${m.displayName.split(" ")[0]}`).join(", ")
-      : "@Unassigned"
+  const memberDirectory = buildUniqueMemberHandles(input.members)
+  const suggestedOwnerEnum = Array.from(
+    new Set([...memberDirectory.map((m) => m.handle), "@Unassigned"])
+  )
+  const ownerUidEnum = Array.from(new Set([...memberDirectory.map((m) => m.uid), ""]))
+  const validUidSet = new Set(ownerUidEnum)
+  const validHandleSet = new Set(suggestedOwnerEnum)
+  const handleByUid = new Map(memberDirectory.map((m) => [m.uid, m.handle]))
 
   const existingContext =
     input.existingTasks && input.existingTasks.length > 0
@@ -69,20 +202,23 @@ export async function extractBoardWithGemini(input: {
   const prompt = [
     `Today's date: ${input.todayIso}.`,
     `Project room title: ${input.existingTitle}.`,
-    `Team members available: ${memberHandles}.`,
+    `Team members available (JSON {uid, handle}): ${
+      memberDirectory.length > 0 ? JSON.stringify(memberDirectory) : "None"
+    }.`,
     ...existingContext,
     `Project brief:\n${input.brief.trim().slice(0, 6000)}`,
     "",
     `Extract a crisp 1-sentence project summary and 1 to ${maxTasks} concrete, actionable tasks for this student team.`,
-    `Use sequential IDs starting at t${startNumber} (t${startNumber}, t${startNumber + 1}...) and distribute suggested_owner across the available team members when reasonable.`,
+    `Use sequential IDs starting at t${startNumber} (t${startNumber}, t${startNumber + 1}...) and distribute tasks across the available team members when reasonable.`,
+    "For each task, set suggested_owner to a member's exact handle (or '@Unassigned') and set owner_uid to that member's exact uid (or '' if '@Unassigned').",
     "Format due_date concisely like 'Nov 20' or 'Dec 02' (use dates from the brief if mentioned, otherwise realistic milestones after today).",
-    "For each task, include a crisp 1-sentence description (acceptance criteria/scope, max 220 chars) and classify task_type as one of: frontend, backend, design, research, general.",
+    "For each task, include a crisp 1-sentence description (acceptance criteria/scope, max 220 chars), classify task_type as one of: frontend, backend, design, research, general, and assign an integer effort weight from 1 (small/quick) to 3 (large/complex).",
     "Set status to 'todo' unless the brief explicitly says a task is already in progress, blocked, or done.",
   ].join("\n")
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
+  const response = await callGenerateContent({
     contents: prompt,
+    maxOutputTokens: 4000,
     config: {
       systemInstruction:
         "You are Cohort, an AI project manager for student group projects. Turn pasted project briefs into clear, balanced, actionable task boards in strict JSON.",
@@ -115,9 +251,21 @@ export async function extractBoardWithGemini(input: {
                   type: Type.STRING,
                   description: "One of: frontend, backend, design, research, general.",
                 },
+                weight: {
+                  type: Type.INTEGER,
+                  minimum: 1,
+                  maximum: 3,
+                  description: "Effort weight integer from 1 (small) to 3 (large).",
+                },
                 suggested_owner: {
                   type: Type.STRING,
-                  description: "Owner handle prefixed with @, e.g. @Priya.",
+                  enum: suggestedOwnerEnum,
+                  description: "Owner handle from the team member list, or '@Unassigned'.",
+                },
+                owner_uid: {
+                  type: Type.STRING,
+                  enum: ownerUidEnum,
+                  description: "Matching uid of the assigned member, or '' if unassigned.",
                 },
                 due_date: {
                   type: Type.STRING,
@@ -128,7 +276,17 @@ export async function extractBoardWithGemini(input: {
                   description: "One of: todo, in_progress, blocked, done.",
                 },
               },
-              required: ["id", "title", "description", "task_type", "suggested_owner", "due_date", "status"],
+              required: [
+                "id",
+                "title",
+                "description",
+                "task_type",
+                "weight",
+                "suggested_owner",
+                "owner_uid",
+                "due_date",
+                "status",
+              ],
             },
           },
         },
@@ -137,10 +295,24 @@ export async function extractBoardWithGemini(input: {
     },
   })
 
-  const rawText = (response.text ?? "{}").trim()
-  const parsed = JSON.parse(rawText) as {
+  const rawText = (response.text ?? "").trim()
+  if (!rawText) {
+    throw new GeminiBadOutputError("Gemini returned an empty response while extracting the board.")
+  }
+
+  let parsed: {
     summary?: unknown
     tasks?: Array<Partial<ExtractedTask>>
+  }
+  try {
+    parsed = JSON.parse(rawText) as {
+      summary?: unknown
+      tasks?: Array<Partial<ExtractedTask>>
+    }
+  } catch {
+    throw new GeminiBadOutputError(
+      "Gemini returned malformed task board JSON. Please try again."
+    )
   }
 
   const rawTasks = Array.isArray(parsed.tasks) ? parsed.tasks : []
@@ -149,25 +321,41 @@ export async function extractBoardWithGemini(input: {
     const title = String(t.title || `Task ${startNumber + index}`).trim().slice(0, 200) || `Task ${startNumber + index}`
     const description = String(t.description || "").trim().slice(0, 500)
     const task_type = detectTaskType(title, description, t.task_type)
-    let owner = String(t.suggested_owner || memberHandles.split(",")[0] || "@Team").trim()
-    if (!owner.startsWith("@")) owner = `@${owner}`
-    owner = owner.slice(0, 80)
+    const rawOwnerUid = typeof t.owner_uid === "string" ? t.owner_uid.trim() : ""
+    const owner_uid = validUidSet.has(rawOwnerUid) ? rawOwnerUid : ""
+    let owner = String(t.suggested_owner || "@Unassigned").trim()
+    if (owner_uid && (!validHandleSet.has(owner) || owner === "@Unassigned")) {
+      owner = handleByUid.get(owner_uid) || "@Unassigned"
+    } else if (!validHandleSet.has(owner)) {
+      if (!owner.startsWith("@")) owner = `@${owner}`
+    }
+    owner = owner.slice(0, 80) || "@Unassigned"
     const dueDate = String(t.due_date || "TBD").trim().slice(0, 40) || "TBD"
     const rawStatus = String(t.status || "todo").trim()
     const status = (VALID_STATUSES.has(rawStatus) ? rawStatus : "todo") as ExtractedTask["status"]
+    const rawWeight =
+      typeof t.weight === "number" ? Math.round(t.weight) : Math.round(Number(t.weight))
+    const weight: 1 | 2 | 3 =
+      Number.isFinite(rawWeight) && rawWeight >= 3
+        ? 3
+        : Number.isFinite(rawWeight) && rawWeight === 2
+          ? 2
+          : 1
     return {
       id,
       title,
       description,
       task_type,
+      weight,
       suggested_owner: owner,
+      owner_uid,
       due_date: dueDate,
       status,
     }
   })
 
   if (tasks.length === 0) {
-    throw new Error("Gemini did not return any tasks for that brief.")
+    throw new GeminiBadOutputError("Gemini did not return any tasks for that brief.")
   }
 
   const summary =
@@ -189,8 +377,6 @@ export async function generateCheckInWithGemini(input: {
   members: Array<{ displayName: string }>
   todayIso: string
 }): Promise<string> {
-  const ai = getGeminiClient()
-
   const prompt = [
     `Today's date: ${input.todayIso}.`,
     `Project: ${input.roomTitle}`,
@@ -203,9 +389,9 @@ export async function generateCheckInWithGemini(input: {
     "If the board is empty, suggest pasting a brief with @cohort extract.",
   ].join("\n")
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
+  const response = await callGenerateContent({
     contents: prompt,
+    maxOutputTokens: 600,
     config: {
       systemInstruction:
         "You are @cohort, a helpful, concise teammate in a student project group chat. Be direct, practical, and only cite tasks and dates actually on the board.",
@@ -232,8 +418,6 @@ export async function generateProactiveNudgeWithGemini(input: {
   members: Array<{ displayName: string }>
   todayIso: string
 }): Promise<string> {
-  const ai = getGeminiClient()
-
   const prompt = [
     `Today's date: ${input.todayIso}.`,
     `Project: ${input.roomTitle}`,
@@ -246,9 +430,9 @@ export async function generateProactiveNudgeWithGemini(input: {
     "Cite the exact task ID and @owner if applicable, and suggest one concrete next step (e.g., splitting a blocker, updating status with @cohort mark, or picking a quick win).",
   ].join("\n")
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
+  const response = await callGenerateContent({
     contents: prompt,
+    maxOutputTokens: 300,
     config: {
       systemInstruction:
         "You are @cohort, an attentive AI teammate participating alongside students in a project room. Be warm, concise, and factual—only cite tasks, owners, and dates that exist on the board.",
@@ -259,6 +443,99 @@ export async function generateProactiveNudgeWithGemini(input: {
     response.text?.trim().slice(0, 1500) ||
     `Heads up team — ${input.summaryContext} Drop an update here or run "@cohort check-in" if you want to reprioritize.`
   )
+}
+
+function clampPlainTextReply(text: string, maxLen = 600): string {
+  const cleaned = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\*\*([\s\S]*?)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .trim()
+
+  if (cleaned.length <= maxLen) return cleaned
+
+  const head = cleaned.slice(0, maxLen)
+  const sentenceEnd = Math.max(head.lastIndexOf(". "), head.lastIndexOf("! "), head.lastIndexOf("? "))
+  if (sentenceEnd >= Math.floor(maxLen * 0.55)) {
+    return head.slice(0, sentenceEnd + 1).trimEnd()
+  }
+
+  const bounded = cleaned.slice(0, maxLen - 1)
+  const lastSpace = bounded.lastIndexOf(" ")
+  const cut = lastSpace >= Math.floor(maxLen * 0.6) ? bounded.slice(0, lastSpace) : bounded
+  return `${cut.trimEnd()}…`
+}
+
+export async function generateCohortReplyWithGemini(input: {
+  roomTitle: string
+  roomSummary: string
+  tasks: Array<{
+    id: string
+    title: string
+    description?: string
+    suggested_owner: string
+    due_date: string
+    status: string
+  }>
+  members: Array<{ displayName: string }>
+  messages: Array<{
+    senderName: string
+    role: string
+    text: string
+    createdAt?: string
+  }>
+  question: string
+  todayIso: string
+}): Promise<string> {
+  const validTaskIds = input.tasks.map((t) => t.id)
+  const chatHistory =
+    input.messages.length > 0
+      ? input.messages
+          .map(
+            (m) =>
+              `- ${m.role === "assistant" ? "@cohort" : m.senderName}: ${m.text.trim().slice(0, 500)}`
+          )
+          .join("\n")
+      : "No recent messages."
+
+  const prompt = [
+    `Today's date: ${input.todayIso}.`,
+    `Room title: ${input.roomTitle}`,
+    `Room summary: ${input.roomSummary || "No summary yet."}`,
+    `Members: ${input.members.map((m) => m.displayName).join(", ") || "None"}`,
+    `Valid task IDs on the board: ${validTaskIds.join(", ") || "NONE (board is empty)"}`,
+    `Board tasks (JSON): ${JSON.stringify(input.tasks)}`,
+    "",
+    "Recent messages (oldest to newest):",
+    chatHistory,
+    "",
+    `Teammate question/message: ${input.question.trim().slice(0, 2000)}`,
+    "",
+    "Respond concisely in plain text (no markdown, no bolding, no headers, no code fences).",
+    "Maximum length: 600 characters (aim for 1-3 short sentences under 550 characters).",
+    "Only cite task IDs that actually appear in the valid task IDs list above; never invent task IDs, owners, or dates.",
+  ].join("\n")
+
+  const response = await callGenerateContent({
+    contents: prompt,
+    maxOutputTokens: 600,
+    config: {
+      systemInstruction:
+        "You are @cohort, a helpful and concise teammate in a student group project room. Answer questions using only the room summary, board tasks, members, and recent messages provided. Reply in plain text only, never exceed 600 characters, and cite only task IDs that exist on the board.",
+    },
+  })
+
+  const raw = (response.text ?? "").trim()
+  if (!raw) {
+    return clampPlainTextReply(
+      validTaskIds.length > 0
+        ? `I'm tracking ${validTaskIds.length} tasks (${validTaskIds.slice(0, 5).join(", ")}). Ask about a specific task or run "@cohort check-in" for a full summary.`
+        : 'There are no tasks on the board yet. Paste a brief with "@cohort extract <brief>" or add a task manually to get started.'
+    )
+  }
+
+  return clampPlainTextReply(raw, 600)
 }
 
 export async function generateSandboxStarterWithGemini(input: {
@@ -272,13 +549,12 @@ export async function generateSandboxStarterWithGemini(input: {
   owner: string
   dueDate: string
 }): Promise<SandboxFiles> {
-  const ai = getGeminiClient()
 
   const modeInstructions =
     input.templateMode === "react"
       ? [
           "Generate a clean, working single-file React prototype tailored specifically to this task.",
-          "Return primaryCode as valid JSX for src/App.jsx (must default export `App`, may import React and hooks `useState, useEffect, useRef, useMemo, useCallback` from 'react', and no external third-party packages).",
+          "Return primaryCode as valid JSX for src/App.jsx (must default export `App`, may import React and any React hooks from 'react', and no external third-party packages).",
           "Return secondaryCode as complete, modern CSS for src/styles.css.",
           "Return extraCode as empty string.",
         ].join(" ")
@@ -315,9 +591,9 @@ export async function generateSandboxStarterWithGemini(input: {
     "Keep code concise, immediately runnable with realistic sample data, and free of placeholder TODO stubs where real interactivity can be shown.",
   ].join("\n")
 
-  const response = await ai.models.generateContent({
-    model: MODEL,
+  const response = await callGenerateContent({
     contents: prompt,
+    maxOutputTokens: 8000,
     config: {
       systemInstruction:
         "You are @cohort, helping a student team turn a Kanban task into an immediate runnable starter prototype. Return strict JSON matching the schema.",
@@ -343,11 +619,26 @@ export async function generateSandboxStarterWithGemini(input: {
     },
   })
 
-  const rawText = (response.text ?? "{}").trim()
-  const parsed = JSON.parse(rawText) as {
+  const rawText = (response.text ?? "").trim()
+  if (!rawText) {
+    throw new GeminiBadOutputError("Gemini returned an empty starter template. Please try again.")
+  }
+
+  let parsed: {
     primaryCode?: unknown
     secondaryCode?: unknown
     extraCode?: unknown
+  }
+  try {
+    parsed = JSON.parse(rawText) as {
+      primaryCode?: unknown
+      secondaryCode?: unknown
+      extraCode?: unknown
+    }
+  } catch {
+    throw new GeminiBadOutputError(
+      "Gemini returned malformed starter code JSON. Please try again."
+    )
   }
 
   const primary = String(parsed.primaryCode || "").trim()
@@ -355,7 +646,7 @@ export async function generateSandboxStarterWithGemini(input: {
   const extra = String(parsed.extraCode || "").trim()
 
   if (!primary) {
-    throw new Error("Gemini returned an empty starter template.")
+    throw new GeminiBadOutputError("Gemini returned an empty starter template. Please try again.")
   }
 
   if (input.templateMode === "react") {

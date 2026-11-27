@@ -58,7 +58,7 @@ service cloud.firestore {
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
         && data.summary is string && data.summary.size() <= 600
         && isValidId(data.ownerId)
-        && data.nextTaskNumber is int && data.nextTaskNumber >= 1 && data.nextTaskNumber <= 200
+        && data.nextTaskNumber is int && data.nextTaskNumber >= 1 && data.nextTaskNumber <= 1000
         && data.createdAt is timestamp
         && data.updatedAt is timestamp
         && (!('agentAggressiveness' in data) || data.agentAggressiveness in ['low', 'medium', 'high'])
@@ -110,11 +110,12 @@ service cloud.firestore {
 
     function isValidTask(data, taskId) {
       return data.keys().hasAll(['id', 'title', 'suggested_owner', 'owner_uid', 'due_date', 'status', 'updatedBy', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'title', 'description', 'task_type', 'suggested_owner', 'owner_uid', 'due_date', 'status', 'updatedBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'title', 'description', 'task_type', 'weight', 'suggested_owner', 'owner_uid', 'due_date', 'status', 'updatedBy', 'createdAt', 'updatedAt'])
         && data.id is string && data.id == taskId && isValidTaskId(data.id)
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
         && (!('description' in data) || (data.description is string && data.description.size() <= 500))
         && (!('task_type' in data) || data.task_type in ['frontend', 'backend', 'design', 'research', 'general'])
+        && (!('weight' in data) || (data.weight is int && data.weight >= 1 && data.weight <= 3))
         && data.suggested_owner is string && data.suggested_owner.size() >= 1 && data.suggested_owner.size() <= 80
         && data.owner_uid is string && data.owner_uid.size() <= 128
         && data.due_date is string && data.due_date.size() >= 1 && data.due_date.size() <= 40
@@ -307,7 +308,7 @@ service cloud.firestore {
           && incoming().id == existing().id
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'task_type', 'suggested_owner', 'owner_uid', 'due_date', 'status', 'updatedBy', 'updatedAt']);
+          && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'task_type', 'weight', 'suggested_owner', 'owner_uid', 'due_date', 'status', 'updatedBy', 'updatedAt']);
         allow delete: if isSignedIn()
           && isValidRoomCode(roomCode)
           && isValidTaskId(taskId)

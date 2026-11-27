@@ -437,7 +437,7 @@ export default function FairnessDashboard({
       </section>
 
       <p className="fairness-formula-note">
-        Formula: Fairness Score uses Jain’s Evenness Index over weighted contributions (3 pts per completed task, 1 pt per in-progress task, 0.5 pt per logged update up to 15). Zero extra Firestore reads — derived live from subscribed tasks and logs.
+        Formula: Fairness Score uses Jain’s Evenness Index over activity-log points (+3 × task weight 1–3 for the first completion per task, +1 for the first start per task, repeated toggles add 0, and other actions capped at 2 pts). Zero extra Firestore reads — derived live from subscribed tasks and logs.
       </p>
     </div>
   )

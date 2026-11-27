@@ -127,11 +127,9 @@ export async function POST(req: NextRequest) {
     const message = error instanceof Error ? error.message : "Failed to create room"
     const lower = message.toLowerCase()
     const status =
-      lower.includes("token") || lower.includes("auth")
-        ? 401
-        : lower.includes("permission") || lower.includes("permission_denied")
-          ? 403
-          : 500
+      lower.includes("permission") || lower.includes("permission_denied")
+        ? 403
+        : 500
     return NextResponse.json({ error: message }, { status })
   }
 }

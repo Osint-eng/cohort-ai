@@ -7,6 +7,7 @@ import {
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   Timestamp,
@@ -16,7 +17,10 @@ import {
 import type { User } from "firebase/auth"
 import { db, handleFirestoreError, OperationType } from "./firebase"
 import {
+  formatTaskDueDateDisplay,
+  getTodayDateInputValue,
   normalizeAggressiveness,
+  toDueDateInputValue,
   type AgentAggressiveness,
   type AgentStatus,
 } from "./proactive-cohort"
@@ -28,14 +32,32 @@ import {
   type TaskType,
 } from "./task-sandbox"
 
+export { formatTaskDueDateDisplay, getTodayDateInputValue, toDueDateInputValue }
 export type { AgentAggressiveness, AgentStatus, TaskType }
 
 export type TaskStatus = "todo" | "in_progress" | "blocked" | "done"
+export type TaskWeight = 1 | 2 | 3
+
+export function normalizeTaskWeight(value: unknown): TaskWeight | undefined {
+  const num =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : Number.NaN
+  if (!Number.isFinite(num)) return undefined
+  const rounded = Math.round(num)
+  if (rounded <= 1) return 1
+  if (rounded === 2) return 2
+  return 3
+}
+
 export type Task = {
   id: string
   title: string
   description?: string
   task_type?: TaskType
+  weight?: TaskWeight
   suggested_owner: string
   owner_uid: string
   due_date: string
@@ -731,6 +753,7 @@ export function subscribeToRoom(
           title: String(data.title || ""),
           description: typeof data.description === "string" ? data.description : undefined,
           task_type: normalizeTaskType(data.task_type),
+          weight: normalizeTaskWeight(data.weight),
           suggested_owner: String(data.suggested_owner || "@Team"),
           owner_uid: String(data.owner_uid || ""),
           due_date: String(data.due_date || "TBD"),
@@ -1000,3 +1023,198 @@ export async function reassignTaskFirestore(
     handleFirestoreError(error, OperationType.WRITE, `rooms/${code}/tasks/${task.id}`)
   }
 }
+
+export type ManualTaskInput = {
+  title: string
+  description?: string
+  task_type: TaskType
+  weight?: TaskWeight
+  owner_uid: string
+  suggested_owner: string
+  due_date: string
+}
+
+function sanitizeManualTaskInput(input: ManualTaskInput): {
+  title: string
+  description: string
+  task_type: TaskType
+  weight: TaskWeight
+  owner_uid: string
+  suggested_owner: string
+  due_date: string
+} {
+  const title = input.title.trim().slice(0, 200)
+  if (!title) {
+    throw new Error("Task title is required (1–200 characters).")
+  }
+  const description = (input.description ?? "").trim().slice(0, 500)
+  const task_type = normalizeTaskType(input.task_type) || "general"
+  const weight = normalizeTaskWeight(input.weight) ?? 1
+  const owner_uid = (input.owner_uid || "").trim().slice(0, 128)
+  const suggested_owner = (input.suggested_owner || "@Team").trim().slice(0, 80) || "@Team"
+  const due_date = input.due_date.trim().slice(0, 40)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(due_date)) {
+    throw new Error("Please select a valid due date.")
+  }
+  return {
+    title,
+    description,
+    task_type,
+    weight,
+    owner_uid,
+    suggested_owner,
+    due_date,
+  }
+}
+
+export async function createTaskFirestore(
+  rawCode: string,
+  input: ManualTaskInput,
+  user: User
+): Promise<string> {
+  const code = normalizeRoomCode(rawCode)
+  const clean = sanitizeManualTaskInput(input)
+  const roomRef = doc(db, "rooms", code)
+
+  let taskId = ""
+  try {
+    taskId = await runTransaction(db, async (tx) => {
+      const roomSnap = await tx.get(roomRef)
+      if (!roomSnap.exists()) {
+        throw new RoomNotFoundError()
+      }
+      const roomData = roomSnap.data()
+      const rawNext = roomData.nextTaskNumber
+      const nextNum =
+        typeof rawNext === "number" && Number.isInteger(rawNext) && rawNext >= 1 ? rawNext : 1
+      if (nextNum >= 1000) {
+        throw new Error("This room has reached the limit of 999 tasks.")
+      }
+      tx.update(roomRef, {
+        nextTaskNumber: nextNum + 1,
+        updatedAt: serverTimestamp(),
+      })
+      return `t${nextNum}`
+    })
+  } catch (error) {
+    if (error instanceof RoomNotFoundError || (error instanceof Error && error.message.includes("reached the limit"))) {
+      throw error
+    }
+    handleFirestoreError(error, OperationType.WRITE, `rooms/${code}`)
+  }
+
+  const batch = writeBatch(db)
+  const taskRef = doc(db, "rooms", code, "tasks", taskId)
+  const logId = makeClientId("log")
+  const logRef = doc(db, "rooms", code, "logs", logId)
+
+  const taskPayload: Record<string, unknown> = {
+    id: taskId,
+    title: clean.title,
+    task_type: clean.task_type,
+    weight: clean.weight,
+    suggested_owner: clean.suggested_owner,
+    owner_uid: clean.owner_uid,
+    due_date: clean.due_date,
+    status: "todo" as TaskStatus,
+    updatedBy: user.uid,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }
+  if (clean.description) {
+    taskPayload.description = clean.description
+  }
+
+  batch.set(taskRef, taskPayload)
+  batch.set(logRef, {
+    id: logId,
+    actorId: user.uid,
+    triggeredBy: user.uid,
+    actor: getUserDisplayName(user),
+    action: "created",
+    task_id: taskId,
+    note: clean.title.slice(0, 500),
+    createdAt: serverTimestamp(),
+  })
+
+  try {
+    await batch.commit()
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `rooms/${code}/tasks/${taskId}`)
+  }
+
+  return taskId
+}
+
+export async function updateTaskFieldsFirestore(
+  rawCode: string,
+  task: Task,
+  updates: ManualTaskInput,
+  user: User
+): Promise<void> {
+  const code = normalizeRoomCode(rawCode)
+  const clean = sanitizeManualTaskInput(updates)
+  const batch = writeBatch(db)
+  const taskRef = doc(db, "rooms", code, "tasks", task.id)
+  const logId = makeClientId("log")
+  const logRef = doc(db, "rooms", code, "logs", logId)
+
+  batch.update(taskRef, {
+    title: clean.title,
+    description: clean.description,
+    task_type: clean.task_type,
+    weight: clean.weight,
+    suggested_owner: clean.suggested_owner,
+    owner_uid: clean.owner_uid,
+    due_date: clean.due_date,
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp(),
+  })
+  batch.set(logRef, {
+    id: logId,
+    actorId: user.uid,
+    triggeredBy: user.uid,
+    actor: getUserDisplayName(user),
+    action: "edited",
+    task_id: task.id,
+    note: clean.title.slice(0, 500),
+    createdAt: serverTimestamp(),
+  })
+
+  try {
+    await batch.commit()
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `rooms/${code}/tasks/${task.id}`)
+  }
+}
+
+export async function deleteTaskFirestore(
+  rawCode: string,
+  task: Task,
+  user: User
+): Promise<void> {
+  const code = normalizeRoomCode(rawCode)
+  const batch = writeBatch(db)
+  const taskRef = doc(db, "rooms", code, "tasks", task.id)
+  const logId = makeClientId("log")
+  const logRef = doc(db, "rooms", code, "logs", logId)
+
+  batch.delete(taskRef)
+  batch.set(logRef, {
+    id: logId,
+    actorId: user.uid,
+    triggeredBy: user.uid,
+    actor: getUserDisplayName(user),
+    action: "deleted",
+    task_id: task.id,
+    note: task.title.slice(0, 500),
+    createdAt: serverTimestamp(),
+  })
+
+  try {
+    await batch.commit()
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `rooms/${code}/tasks/${task.id}`)
+  }
+}
+

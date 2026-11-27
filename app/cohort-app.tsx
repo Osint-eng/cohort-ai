@@ -32,6 +32,7 @@ import {
   MessageCircle,
   Moon,
   MoreHorizontal,
+  Pencil,
   Play,
   Plus,
   Scale,
@@ -40,6 +41,7 @@ import {
   ShieldCheck,
   Sparkles,
   Sun,
+  Trash2,
   UserCheck,
   Users,
   UserX,
@@ -52,15 +54,20 @@ import { auth, googleProvider, validateFirestoreConnection } from "@/lib/firebas
 import {
   approvePendingMember,
   createRoomOnServer,
+  createTaskFirestore,
   createTemporaryInvite,
+  deleteTaskFirestore,
   ensureRoomMembership,
   formatMemberLastSeen,
+  formatTaskDueDateDisplay,
   getFriendlyErrorMessage,
+  getTodayDateInputValue,
   getUserDisplayName,
   InviteExpiredOrLimitError,
   isMemberOnline,
   leaveRoomMembership,
   normalizeRoomCode,
+  normalizeTaskWeight,
   reassignTaskFirestore,
   rejectPendingMember,
   revokeInvite,
@@ -73,8 +80,10 @@ import {
   subscribeToRoom,
   subscribeToRoomInvites,
   suggestDefaultRoomTitle,
+  toDueDateInputValue,
   triggerCohortPulse,
   updateRoomAgentAggressiveness,
+  updateTaskFieldsFirestore,
   updateTaskStatusFirestore,
   validateInviteLink,
   type AgentAggressiveness,
@@ -86,6 +95,8 @@ import {
   type RoomMeta,
   type Task,
   type TaskStatus,
+  type TaskType,
+  type TaskWeight,
 } from "@/lib/api"
 import { PROACTIVE_THRESHOLDS } from "@/lib/proactive-cohort"
 
@@ -208,6 +219,16 @@ export default function CohortApp({
   const [recentRooms, setRecentRooms] = useState<Array<{ code: string; title: string }>>([])
   const [shareCardDismissed, setShareCardDismissed] = useState(false)
   const [sandboxTaskId, setSandboxTaskId] = useState<string | null>(null)
+  const [taskModalMode, setTaskModalMode] = useState<"create" | "edit" | null>(null)
+  const [editingTask, setEditingTask] = useState<Task | null>(null)
+  const [taskTitle, setTaskTitle] = useState("")
+  const [taskDescription, setTaskDescription] = useState("")
+  const [taskType, setTaskType] = useState<TaskType>("general")
+  const [taskWeight, setTaskWeight] = useState<TaskWeight>(1)
+  const [taskOwnerUid, setTaskOwnerUid] = useState("")
+  const [taskDueDate, setTaskDueDate] = useState("")
+  const [savingTask, setSavingTask] = useState(false)
+  const [taskModalError, setTaskModalError] = useState("")
 
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const leftRoomRef = useRef(false)
@@ -732,6 +753,152 @@ export default function CohortApp({
       showToast(`Task reassigned to ${member.name}`)
     } catch (cause) {
       const friendly = getFriendlyErrorMessage(cause, "We couldn’t reassign that task. Please try again.")
+      setError(friendly)
+      showToast(friendly, "error")
+    } finally {
+      setUpdatingTaskId(null)
+    }
+  }
+
+  const openCreateTaskModal = () => {
+    const activeMembers = members.filter((m) => m.role !== "pending")
+    const selfMember = activeMembers.find((m) => m.uid === user?.uid)
+    setEditingTask(null)
+    setTaskTitle("")
+    setTaskDescription("")
+    setTaskType("general")
+    setTaskWeight(1)
+    setTaskOwnerUid(selfMember?.uid || activeMembers[0]?.uid || "")
+    setTaskDueDate(getTodayDateInputValue())
+    setTaskModalError("")
+    setTaskMenuId(null)
+    setTaskModalMode("create")
+  }
+
+  const openEditTaskModal = (task: Task) => {
+    const activeMembers = members.filter((m) => m.role !== "pending")
+    let matchedUid = ""
+    if (task.owner_uid && activeMembers.some((m) => m.uid === task.owner_uid)) {
+      matchedUid = task.owner_uid
+    } else {
+      const cleanHandle = task.suggested_owner.replace(/^@/, "").trim().toLowerCase()
+      if (cleanHandle && cleanHandle !== "team") {
+        const matched = activeMembers.find(
+          (m) =>
+            m.name.toLowerCase() === cleanHandle ||
+            m.name.split(/\s+/)[0]?.toLowerCase() === cleanHandle
+        )
+        if (matched) matchedUid = matched.uid
+      }
+    }
+    const inferredType = task.task_type || getTaskSandboxMeta(task).type
+    setEditingTask(task)
+    setTaskTitle(task.title)
+    setTaskDescription(task.description || "")
+    setTaskType(inferredType)
+    setTaskWeight(normalizeTaskWeight(task.weight) ?? 1)
+    setTaskOwnerUid(matchedUid)
+    setTaskDueDate(toDueDateInputValue(task.due_date, nowMs))
+    setTaskModalError("")
+    setTaskMenuId(null)
+    setTaskModalMode("edit")
+  }
+
+  const closeTaskModal = () => {
+    if (savingTask) return
+    setTaskModalMode(null)
+    setEditingTask(null)
+    setTaskModalError("")
+  }
+
+  const submitTaskModal = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!roomMeta || !user || savingTask || !taskModalMode) return
+
+    const cleanTitle = taskTitle.trim()
+    const cleanDescription = taskDescription.trim()
+    const cleanDueDate = taskDueDate.trim()
+
+    if (!cleanTitle || cleanTitle.length > 200) {
+      setTaskModalError("Title must be between 1 and 200 characters.")
+      return
+    }
+    if (cleanDescription.length > 500) {
+      setTaskModalError("Description must be 500 characters or fewer.")
+      return
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDueDate)) {
+      setTaskModalError("Please select a valid due date.")
+      return
+    }
+
+    const activeMembers = members.filter((m) => m.role !== "pending")
+    const selectedMember = activeMembers.find((m) => m.uid === taskOwnerUid)
+    const ownerUid = selectedMember ? selectedMember.uid : ""
+    const suggestedOwner = selectedMember
+      ? `@${selectedMember.name.split(/\s+/)[0] || selectedMember.name}`.slice(0, 80)
+      : taskModalMode === "edit" && editingTask && !editingTask.owner_uid && editingTask.suggested_owner
+        ? editingTask.suggested_owner.slice(0, 80)
+        : "@Team"
+
+    setSavingTask(true)
+    setTaskModalError("")
+    try {
+      if (taskModalMode === "create") {
+        await createTaskFirestore(
+          roomMeta.code,
+          {
+            title: cleanTitle,
+            description: cleanDescription,
+            task_type: taskType,
+            weight: taskWeight,
+            owner_uid: ownerUid,
+            suggested_owner: suggestedOwner,
+            due_date: cleanDueDate,
+          },
+          user
+        )
+        setTaskModalMode(null)
+        setEditingTask(null)
+        showToast("Task added to board")
+      } else if (taskModalMode === "edit" && editingTask) {
+        await updateTaskFieldsFirestore(
+          roomMeta.code,
+          editingTask,
+          {
+            title: cleanTitle,
+            description: cleanDescription,
+            task_type: taskType,
+            weight: taskWeight,
+            owner_uid: ownerUid,
+            suggested_owner: suggestedOwner,
+            due_date: cleanDueDate,
+          },
+          user
+        )
+        setTaskModalMode(null)
+        setEditingTask(null)
+        showToast("Task updated")
+      }
+    } catch (cause) {
+      const friendly = getFriendlyErrorMessage(cause, "Could not save task. Please try again.")
+      setTaskModalError(friendly)
+      showToast(friendly, "error")
+    } finally {
+      setSavingTask(false)
+    }
+  }
+
+  const handleDeleteTask = async (task: Task) => {
+    if (!roomMeta || !user || updatingTaskId) return
+    setUpdatingTaskId(task.id)
+    setTaskMenuId(null)
+    setError("")
+    try {
+      await deleteTaskFirestore(roomMeta.code, task, user)
+      showToast("Task deleted")
+    } catch (cause) {
+      const friendly = getFriendlyErrorMessage(cause, "We couldn’t delete that task. Please try again.")
       setError(friendly)
       showToast(friendly, "error")
     } finally {
@@ -1624,9 +1791,14 @@ export default function CohortApp({
                 <span>Fairness</span>
               </button>
             </div>
-            <button className="extract-button" onClick={openExtractModal}>
-              <Plus size={14} /> Extract board
-            </button>
+            <div className="board-toolbar-actions">
+              <button type="button" className="add-task-button" onClick={openCreateTaskModal}>
+                <Plus size={14} /> Add task
+              </button>
+              <button type="button" className="extract-button" onClick={openExtractModal}>
+                <Sparkles size={14} /> Extract board
+              </button>
+            </div>
           </div>
 
           {view === "fairness" ? (
@@ -1657,6 +1829,7 @@ export default function CohortApp({
                             key={task.id}
                             task={task}
                             members={approvedMembers}
+                            nowMs={nowMs}
                             menuOpen={taskMenuId === task.id}
                             updating={updatingTaskId === task.id}
                             onToggleMenu={() =>
@@ -1664,6 +1837,8 @@ export default function CohortApp({
                             }
                             onStatusChange={(status) => void changeTaskStatus(task, status)}
                             onReassign={(member) => void changeTaskOwner(task, member)}
+                            onEdit={() => openEditTaskModal(task)}
+                            onDelete={() => void handleDeleteTask(task)}
                             onOpenSandbox={() => {
                               setTaskMenuId(null)
                               setSandboxTaskId(task.id)
@@ -1709,7 +1884,7 @@ export default function CohortApp({
                           <td>
                             <StatusBadge status={task.status} />
                           </td>
-                          <td>{task.due_date}</td>
+                          <td title={task.due_date}>{formatTaskDueDateDisplay(task.due_date, nowMs)}</td>
                           <td>
                             <div className="table-quick-actions">
                               <button
@@ -1736,6 +1911,28 @@ export default function CohortApp({
                               >
                                 Mark blocked
                               </button>
+                              <button
+                                type="button"
+                                className="quick-status-btn"
+                                disabled={updatingTaskId === task.id}
+                                onClick={() => openEditTaskModal(task)}
+                                aria-label={`Edit ${task.title}`}
+                                title="Edit task"
+                              >
+                                <Pencil size={10} />
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="quick-status-btn danger"
+                                disabled={updatingTaskId === task.id}
+                                onClick={() => void handleDeleteTask(task)}
+                                aria-label={`Delete ${task.title}`}
+                                title="Delete task"
+                              >
+                                <Trash2 size={10} />
+                                Delete
+                              </button>
                             </div>
                           </td>
                         </tr>
@@ -1752,12 +1949,17 @@ export default function CohortApp({
               </div>
               <strong>No board yet</strong>
               <p>
-                Paste a project brief with <code>@cohort extract</code> in chat or click below to
-                generate tasks with Gemini.
+                Add a task manually, paste a project brief with <code>@cohort extract</code> in
+                chat, or generate tasks with Gemini.
               </p>
-              <button onClick={openExtractModal}>
-                <Plus size={14} /> Extract from a brief
-              </button>
+              <div className="empty-board-actions">
+                <button type="button" onClick={openCreateTaskModal}>
+                  <Plus size={14} /> Add task
+                </button>
+                <button type="button" onClick={openExtractModal}>
+                  <Sparkles size={14} /> Extract from a brief
+                </button>
+              </div>
             </div>
           )}
 
@@ -2237,6 +2439,187 @@ export default function CohortApp({
         </div>
       )}
 
+      {taskModalMode && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !savingTask) closeTaskModal()
+          }}
+        >
+          <section
+            className="extract-dialog task-modal-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="task-modal-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") closeTaskModal()
+            }}
+          >
+            <button
+              type="button"
+              className="dialog-close"
+              onClick={closeTaskModal}
+              disabled={savingTask}
+              aria-label="Close task dialog"
+            >
+              <X size={18} />
+            </button>
+            <div className="dialog-icon">
+              {taskModalMode === "edit" ? <Pencil size={18} /> : <Plus size={20} />}
+            </div>
+            <p className="section-kicker">
+              {taskModalMode === "edit" && editingTask ? `EDIT TASK · ${editingTask.id.toUpperCase()}` : "NEW TASK"}
+            </p>
+            <h2 id="task-modal-title">
+              {taskModalMode === "edit" ? "Edit task details" : "Add a task to the board"}
+            </h2>
+            <p className="dialog-description">
+              {taskModalMode === "edit"
+                ? "Update the task title, notes, type, owner, or due date."
+                : "Create a structured task for your team and sync it in real time."}
+            </p>
+            <form onSubmit={submitTaskModal} className="task-modal-form">
+              <div className="task-modal-field">
+                <div className="task-modal-label-row">
+                  <label htmlFor="manual-task-title">Title</label>
+                  <span>{taskTitle.trim().length}/200</span>
+                </div>
+                <input
+                  id="manual-task-title"
+                  type="text"
+                  autoFocus
+                  required
+                  minLength={1}
+                  maxLength={200}
+                  value={taskTitle}
+                  onChange={(event) => setTaskTitle(event.target.value)}
+                  placeholder="e.g. Build signup form validation"
+                  disabled={savingTask}
+                />
+              </div>
+
+              <div className="task-modal-field">
+                <div className="task-modal-label-row">
+                  <label htmlFor="manual-task-desc">Description</label>
+                  <span>{taskDescription.length}/500</span>
+                </div>
+                <textarea
+                  id="manual-task-desc"
+                  maxLength={500}
+                  rows={3}
+                  value={taskDescription}
+                  onChange={(event) => setTaskDescription(event.target.value)}
+                  placeholder="Optional context, acceptance criteria, or notes..."
+                  disabled={savingTask}
+                />
+              </div>
+
+              <div className="task-modal-row">
+                <div className="task-modal-field">
+                  <label htmlFor="manual-task-type">Task type</label>
+                  <select
+                    id="manual-task-type"
+                    value={taskType}
+                    onChange={(event) => setTaskType(event.target.value as TaskType)}
+                    disabled={savingTask}
+                  >
+                    <option value="frontend">Frontend</option>
+                    <option value="backend">Backend</option>
+                    <option value="design">Design</option>
+                    <option value="research">Research</option>
+                    <option value="general">General</option>
+                  </select>
+                </div>
+
+                <div className="task-modal-field">
+                  <label htmlFor="manual-task-owner">Owner</label>
+                  <select
+                    id="manual-task-owner"
+                    value={taskOwnerUid}
+                    onChange={(event) => setTaskOwnerUid(event.target.value)}
+                    disabled={savingTask}
+                  >
+                    <option value="">@Team (Unassigned)</option>
+                    {approvedMembers.map((member) => (
+                      <option key={member.uid} value={member.uid}>
+                        {member.name} (@{member.name.split(/\s+/)[0] || member.name})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="task-modal-row">
+                <div className="task-modal-field">
+                  <label htmlFor="manual-task-due">Due date</label>
+                  <input
+                    id="manual-task-due"
+                    type="date"
+                    required
+                    value={taskDueDate}
+                    onChange={(event) => setTaskDueDate(event.target.value)}
+                    disabled={savingTask}
+                  />
+                </div>
+
+                <div className="task-modal-field">
+                  <label htmlFor="manual-task-weight">Weight (1–3)</label>
+                  <select
+                    id="manual-task-weight"
+                    value={taskWeight}
+                    onChange={(event) =>
+                      setTaskWeight(normalizeTaskWeight(Number(event.target.value)) ?? 1)
+                    }
+                    disabled={savingTask}
+                  >
+                    <option value={1}>1 · Small (1×)</option>
+                    <option value={2}>2 · Standard (2×)</option>
+                    <option value={3}>3 · Large (3×)</option>
+                  </select>
+                </div>
+              </div>
+
+              {taskModalError && (
+                <p className="form-error modal-error" role="alert">
+                  {taskModalError}
+                </p>
+              )}
+
+              <div className="dialog-footer task-modal-footer">
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={closeTaskModal}
+                  disabled={savingTask}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="primary-button"
+                  type="submit"
+                  disabled={savingTask || !taskTitle.trim() || !taskDueDate}
+                >
+                  {savingTask ? (
+                    <>
+                      <LoaderCircle className="spin" size={15} /> Saving…
+                    </>
+                  ) : taskModalMode === "edit" ? (
+                    <>
+                      Save changes <Check size={15} />
+                    </>
+                  ) : (
+                    <>
+                      Add task <Plus size={15} />
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
       {sandboxTask && user && (
         <TaskSandboxModal
           task={sandboxTask}
@@ -2320,23 +2703,30 @@ function StatusBadge({ status }: { status: TaskStatus }) {
 function TaskCard({
   task,
   members,
+  nowMs,
   menuOpen,
   updating,
   onToggleMenu,
   onStatusChange,
   onReassign,
+  onEdit,
+  onDelete,
   onOpenSandbox,
 }: {
   task: Task
   members: Member[]
+  nowMs: number
   menuOpen: boolean
   updating: boolean
   onToggleMenu: () => void
   onStatusChange: (status: TaskStatus) => void
   onReassign: (member: Member) => void
+  onEdit: () => void
+  onDelete: () => void
   onOpenSandbox: () => void
 }) {
   const sandboxMeta = getTaskSandboxMeta(task)
+  const formattedDue = formatTaskDueDateDisplay(task.due_date, nowMs)
 
   return (
     <article className="task-card">
@@ -2347,6 +2737,14 @@ function TaskCard({
           <span className={`task-type-inline is-${sandboxMeta.type}`}>
             {sandboxMeta.typeLabel}
           </span>
+          {task.weight && task.weight > 1 && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="task-weight-inline" title={`Effort weight ${task.weight}x`}>
+                {task.weight}×
+              </span>
+            </>
+          )}
         </span>
         <button
           aria-label={`Options for ${task.title}`}
@@ -2367,9 +2765,9 @@ function TaskCard({
           </span>
           {task.suggested_owner}
         </span>
-        <span className="due-date">
+        <span className="due-date" title={task.due_date}>
           <ArrowUpRight size={12} />
-          {task.due_date}
+          {formattedDue}
         </span>
       </div>
       <button
@@ -2409,25 +2807,40 @@ function TaskCard({
             if (event.key === "Escape") onToggleMenu()
           }}
         >
-          <button onClick={onOpenSandbox}>
+          <button type="button" onClick={onOpenSandbox}>
             <Play size={13} />
             {sandboxMeta.ctaLabel}
           </button>
+          <button type="button" onClick={onEdit} disabled={updating}>
+            <Pencil size={13} />
+            Edit
+          </button>
+          <button
+            type="button"
+            className="task-action-danger"
+            onClick={onDelete}
+            disabled={updating}
+          >
+            <Trash2 size={13} />
+            Delete
+          </button>
           <div className="task-action-divider" />
-          <button onClick={() => onStatusChange("todo")} disabled={task.status === "todo" || updating}>
+          <button type="button" onClick={() => onStatusChange("todo")} disabled={task.status === "todo" || updating}>
             To do
           </button>
           <button
+            type="button"
             onClick={() => onStatusChange("in_progress")}
             disabled={task.status === "in_progress" || updating}
           >
             In progress
           </button>
-          <button onClick={() => onStatusChange("done")} disabled={task.status === "done" || updating}>
+          <button type="button" onClick={() => onStatusChange("done")} disabled={task.status === "done" || updating}>
             <Check size={13} />
             Mark done
           </button>
           <button
+            type="button"
             onClick={() => onStatusChange("blocked")}
             disabled={task.status === "blocked" || updating}
           >
@@ -2440,6 +2853,7 @@ function TaskCard({
               <span>Reassign to</span>
               {members.map((member) => (
                 <button
+                  type="button"
                   key={member.uid}
                   onClick={() => onReassign(member)}
                   disabled={task.owner_uid === member.uid || updating}

@@ -62,15 +62,12 @@ export async function verifyFirebaseIdToken(authHeader: string | null): Promise<
   const idToken = authHeader.slice("Bearer ".length).trim()
   const parts = idToken.split(".")
   if (parts.length !== 3) {
-    throw new Error("Invalid JWT format")
+    throw new AuthVerificationError("Invalid JWT format", 401)
   }
 
   const [headerB64, payloadB64, sigB64] = parts
-  const header = JSON.parse(base64UrlDecode(headerB64).toString("utf8")) as {
-    alg?: string
-    kid?: string
-  }
-  const payload = JSON.parse(base64UrlDecode(payloadB64).toString("utf8")) as {
+  let header: { alg?: string; kid?: string }
+  let payload: {
     aud?: string
     iss?: string
     sub?: string
@@ -81,15 +78,34 @@ export async function verifyFirebaseIdToken(authHeader: string | null): Promise<
     name?: string
     picture?: string
   }
+  try {
+    header = JSON.parse(base64UrlDecode(headerB64).toString("utf8")) as {
+      alg?: string
+      kid?: string
+    }
+    payload = JSON.parse(base64UrlDecode(payloadB64).toString("utf8")) as {
+      aud?: string
+      iss?: string
+      sub?: string
+      exp?: number
+      iat?: number
+      email?: string
+      email_verified?: boolean
+      name?: string
+      picture?: string
+    }
+  } catch {
+    throw new AuthVerificationError("Invalid JWT format", 401)
+  }
 
   if (header.alg !== "RS256" || !header.kid) {
-    throw new Error("Unsupported JWT algorithm")
+    throw new AuthVerificationError("Unsupported JWT algorithm", 401)
   }
 
   const certs = await getFirebasePublicCerts()
   const certPem = certs[header.kid]
   if (!certPem) {
-    throw new Error("Unknown JWT key ID")
+    throw new AuthVerificationError("Unknown JWT key ID", 401)
   }
 
   const verifier = crypto.createVerify("RSA-SHA256")
@@ -97,19 +113,19 @@ export async function verifyFirebaseIdToken(authHeader: string | null): Promise<
   verifier.end()
   const isValid = verifier.verify(certPem, base64UrlDecode(sigB64))
   if (!isValid) {
-    throw new Error("Invalid Firebase ID token signature")
+    throw new AuthVerificationError("Invalid Firebase ID token signature", 401)
   }
 
   const nowSec = Math.floor(Date.now() / 1000)
   const expectedIssuer = `https://securetoken.google.com/${firebaseConfig.projectId}`
   if (payload.aud !== firebaseConfig.projectId || payload.iss !== expectedIssuer) {
-    throw new Error("Invalid token audience or issuer")
+    throw new AuthVerificationError("Invalid token audience or issuer", 401)
   }
   if (!payload.sub || typeof payload.sub !== "string") {
-    throw new Error("Missing token subject")
+    throw new AuthVerificationError("Missing token subject", 401)
   }
   if (!payload.exp || nowSec >= payload.exp) {
-    throw new Error("Firebase ID token has expired")
+    throw new AuthVerificationError("Firebase ID token has expired", 401)
   }
   if (payload.email_verified !== true) {
     throw new AuthVerificationError(

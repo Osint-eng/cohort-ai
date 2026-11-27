@@ -938,234 +938,10 @@ export async function POST(req: NextRequest) {
   }
 }
 
-const MICRO_REACT_IFRAME_RUNTIME = `
-const React = (() => {
-  const Fragment = Symbol("Fragment");
-  let rootComponent = null;
-  let rootContainer = null;
-  let hookStates = [];
-  let hookCursor = 0;
-  let pendingEffects = [];
-  let effectCleanups = [];
-  let renderScheduled = false;
-
-  function flattenChildren(children, out = []) {
-    for (const child of children) {
-      if (Array.isArray(child)) {
-        flattenChildren(child, out);
-      } else if (child !== null && child !== undefined && typeof child !== "boolean") {
-        out.push(child);
-      }
-    }
-    return out;
-  }
-
-  function createElement(type, props, ...children) {
-    const normalizedProps = props ? { ...props } : {};
-    const flat = flattenChildren(children.length ? children : normalizedProps.children !== undefined ? [normalizedProps.children] : []);
-    delete normalizedProps.children;
-    return { type, props: normalizedProps, children: flat };
-  }
-
-  function useState(initial) {
-    const idx = hookCursor++;
-    if (!(idx in hookStates)) {
-      hookStates[idx] = typeof initial === "function" ? initial() : initial;
-    }
-    const setState = (next) => {
-      const value = typeof next === "function" ? next(hookStates[idx]) : next;
-      if (!Object.is(hookStates[idx], value)) {
-        hookStates[idx] = value;
-        scheduleRender();
-      }
-    };
-    return [hookStates[idx], setState];
-  }
-
-  function useRef(initial) {
-    const idx = hookCursor++;
-    if (!(idx in hookStates)) {
-      hookStates[idx] = { current: initial };
-    }
-    return hookStates[idx];
-  }
-
-  function depsChanged(prevDeps, nextDeps) {
-    if (!prevDeps || !nextDeps) return true;
-    if (prevDeps.length !== nextDeps.length) return true;
-    for (let i = 0; i < nextDeps.length; i++) {
-      if (!Object.is(prevDeps[i], nextDeps[i])) return true;
-    }
-    return false;
-  }
-
-  function useMemo(factory, deps) {
-    const idx = hookCursor++;
-    const prev = hookStates[idx];
-    if (!prev || depsChanged(prev.deps, deps)) {
-      const value = factory();
-      hookStates[idx] = { value, deps };
-      return value;
-    }
-    return prev.value;
-  }
-
-  function useCallback(fn, deps) {
-    return useMemo(() => fn, deps);
-  }
-
-  function useEffect(effect, deps) {
-    const idx = hookCursor++;
-    const prev = hookStates[idx];
-    if (!prev || depsChanged(prev.deps, deps)) {
-      hookStates[idx] = { deps };
-      pendingEffects.push({ idx, effect });
-    }
-  }
-
-  function renderNode(vnode) {
-    if (vnode === null || vnode === undefined || typeof vnode === "boolean") {
-      return document.createTextNode("");
-    }
-    if (typeof vnode === "string" || typeof vnode === "number") {
-      return document.createTextNode(String(vnode));
-    }
-    if (Array.isArray(vnode)) {
-      const frag = document.createDocumentFragment();
-      for (const child of vnode) frag.appendChild(renderNode(child));
-      return frag;
-    }
-    if (vnode.type === Fragment) {
-      const frag = document.createDocumentFragment();
-      for (const child of vnode.children) frag.appendChild(renderNode(child));
-      return frag;
-    }
-    if (typeof vnode.type === "function") {
-      const result = vnode.type({ ...vnode.props, children: vnode.children });
-      return renderNode(result);
-    }
-
-    const svgTags = new Set(["svg", "path", "circle", "rect", "line", "polyline", "polygon", "g"]);
-    const el = svgTags.has(vnode.type)
-      ? document.createElementNS("http://www.w3.org/2000/svg", vnode.type)
-      : document.createElement(vnode.type);
-
-    for (const [key, val] of Object.entries(vnode.props || {})) {
-      if (val === undefined || val === null || key === "key" || key === "ref") continue;
-      if (key === "className") {
-        el.setAttribute("class", String(val));
-      } else if (key === "htmlFor") {
-        el.setAttribute("for", String(val));
-      } else if (key === "style" && typeof val === "object") {
-        Object.assign(el.style, val);
-      } else if (key === "dangerouslySetInnerHTML" && val.__html !== undefined) {
-        el.innerHTML = String(val.__html);
-      } else if (key.startsWith("on") && typeof val === "function") {
-        const eventName = key.slice(2).toLowerCase();
-        if (eventName === "change" && (vnode.type === "input" || vnode.type === "textarea")) {
-          el.addEventListener("input", val);
-        } else {
-          el.addEventListener(eventName, val);
-        }
-      } else if (key === "value" && ("value" in el)) {
-        el.value = String(val);
-      } else if (key === "checked" && ("checked" in el)) {
-        el.checked = Boolean(val);
-      } else if (typeof val === "boolean") {
-        if (val) el.setAttribute(key, "");
-      } else {
-        el.setAttribute(key, String(val));
-      }
-    }
-
-    for (const child of vnode.children || []) {
-      el.appendChild(renderNode(child));
-    }
-    return el;
-  }
-
-  function flushRender() {
-    renderScheduled = false;
-    if (!rootComponent || !rootContainer) return;
-
-    // Preserve active input/textarea focus and caret across synchronous re-renders
-    const active = document.activeElement;
-    let focusIndex = -1;
-    let selStart = null;
-    let selEnd = null;
-    if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
-      const inputs = Array.from(rootContainer.querySelectorAll("input, textarea"));
-      focusIndex = inputs.indexOf(active);
-      try {
-        selStart = active.selectionStart;
-        selEnd = active.selectionEnd;
-      } catch {}
-    }
-
-    hookCursor = 0;
-    pendingEffects = [];
-    const tree = createElement(rootComponent, {});
-    const dom = renderNode(tree);
-    rootContainer.replaceChildren(dom);
-
-    if (focusIndex >= 0) {
-      const inputs = Array.from(rootContainer.querySelectorAll("input, textarea"));
-      const target = inputs[focusIndex];
-      if (target) {
-        target.focus();
-        if (typeof selStart === "number" && typeof selEnd === "number") {
-          try { target.setSelectionRange(selStart, selEnd); } catch {}
-        }
-      }
-    }
-
-    const effectsToRun = pendingEffects.slice();
-    pendingEffects = [];
-    queueMicrotask(() => {
-      for (const { idx, effect } of effectsToRun) {
-        if (typeof effectCleanups[idx] === "function") {
-          try { effectCleanups[idx](); } catch {}
-        }
-        const cleanup = effect();
-        effectCleanups[idx] = typeof cleanup === "function" ? cleanup : undefined;
-      }
-    });
-  }
-
-  function scheduleRender() {
-    if (renderScheduled) return;
-    renderScheduled = true;
-    queueMicrotask(flushRender);
-  }
-
-  function render(vnode, container) {
-    rootContainer = container;
-    if (typeof vnode.type === "function") {
-      rootComponent = vnode.type;
-    } else {
-      rootComponent = () => vnode;
-    }
-    flushRender();
-  }
-
-  return {
-    Fragment,
-    createElement,
-    useState,
-    useEffect,
-    useRef,
-    useMemo,
-    useCallback,
-    createRoot(container) {
-      return {
-        render(vnode) {
-          render(vnode, container);
-        },
-      };
-    },
-  };
-})();
-`
+const REACT_CDN_SCRIPT =
+  "https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"
+const REACT_DOM_CDN_SCRIPT =
+  "https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"
 
 function sanitizeClosingScript(code: string): string {
   return code.replace(/<\/script/gi, "<\\/script")
@@ -1196,7 +972,6 @@ export function compilePreviewSrcDoc(
     }
 
     const runnerScript = `
-${MICRO_REACT_IFRAME_RUNTIME}
 (function() {
   const showErr = (err) => {
     const root = document.getElementById("root") || document.body;
@@ -1204,23 +979,36 @@ ${MICRO_REACT_IFRAME_RUNTIME}
     root.innerHTML = '<div style="margin:16px;padding:14px;border-radius:10px;border:1px solid #f0b5b1;background:#fff5f4;color:#9f2c24;font-family:system-ui,sans-serif;"><strong style="display:block;font-size:13px;margin-bottom:6px;">Preview Runtime Error</strong><pre style="margin:0;white-space:pre-wrap;font-size:12px;">' + msg.replace(/</g, "&lt;") + '</pre></div>';
   };
   window.addEventListener("error", (e) => showErr(e.error || e.message));
+  window.addEventListener("unhandledrejection", (e) => showErr(e.reason || "Unhandled promise rejection"));
   try {
+    const React = window.React;
+    const ReactDOM = window.ReactDOM;
+    if (!React || !ReactDOM || typeof ReactDOM.createRoot !== "function") {
+      throw new Error("Failed to load React 18.3.1 / ReactDOM 18.3.1 runtime from cdnjs.cloudflare.com.");
+    }
     const exports = {};
     const module = { exports };
     const require = (id) => {
       if (id === "react") return { __esModule: true, default: React, ...React };
-      if (id === "react-dom" || id === "react-dom/client") return { __esModule: true, default: React, createRoot: React.createRoot };
+      if (id === "react-dom") return { __esModule: true, default: ReactDOM, ...ReactDOM };
+      if (id === "react-dom/client") {
+        return {
+          __esModule: true,
+          default: ReactDOM,
+          createRoot: ReactDOM.createRoot,
+          hydrateRoot: ReactDOM.hydrateRoot,
+        };
+      }
       return {};
     };
-    const { Fragment, useState, useEffect, useRef, useMemo, useCallback } = React;
-    const fn = new Function("require", "exports", "module", "React", "Fragment", "useState", "useEffect", "useRef", "useMemo", "useCallback", ${JSON.stringify(compiledJs)});
-    fn(require, exports, module, React, Fragment, useState, useEffect, useRef, useMemo, useCallback);
+    const fn = new Function("require", "exports", "module", "React", "ReactDOM", ${JSON.stringify(compiledJs)});
+    fn(require, exports, module, React, ReactDOM);
     const AppComponent = module.exports && module.exports.default ? module.exports.default : exports.default;
     if (typeof AppComponent !== "function") {
       throw new Error("Expected src/App.jsx to have a default exported React component.");
     }
     const mountNode = document.getElementById("root") || document.body;
-    React.createRoot(mountNode).render(React.createElement(AppComponent, null));
+    ReactDOM.createRoot(mountNode).render(React.createElement(AppComponent, null));
   } catch (err) {
     showErr(err);
   }
@@ -1228,7 +1016,11 @@ ${MICRO_REACT_IFRAME_RUNTIME}
 `
 
     const headInjection = `<style>${cssSource}</style>`
-    const bodyInjection = `<script>${sanitizeClosingScript(runnerScript)}</script>`
+    const bodyInjection = [
+      `<script src="${REACT_CDN_SCRIPT}"></script>`,
+      `<script src="${REACT_DOM_CDN_SCRIPT}"></script>`,
+      `<script>${sanitizeClosingScript(runnerScript)}</script>`,
+    ].join("\n")
 
     let html = baseHtml
     html = html.includes("</head>")
