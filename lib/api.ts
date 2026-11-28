@@ -36,6 +36,11 @@ import {
   type SandboxTemplateMode,
   type TaskType,
 } from "./task-sandbox"
+import {
+  buildFileIdForPath,
+  MAX_ROOM_FILES,
+  validateRoomFileInput,
+} from "./room-files"
 
 export { formatTaskDueDateDisplay, getTodayDateInputValue, toDueDateInputValue }
 export type { AgentAggressiveness, AgentStatus, TaskType }
@@ -113,6 +118,19 @@ export type RoomMeta = {
   agentStatus: AgentStatus
   agentStatusAt?: string
   lastProactiveAt?: string
+}
+
+export type RoomFile = {
+  id: string
+  path: string
+  name: string
+  content: string
+  mimeType: string
+  size: number
+  createdBy: string
+  updatedBy: string
+  createdAt: string
+  updatedAt: string
 }
 
 function parseRoomMeta(code: string, data: Record<string, unknown>): RoomMeta {
@@ -945,6 +963,7 @@ export function subscribeToRoom(
     onMessages: (messages: Message[]) => void
     onMessagesMeta?: (meta: { cursor: MessageCursor | null; hasMore: boolean }) => void
     onTasks: (tasks: Task[]) => void
+    onFiles?: (files: RoomFile[]) => void
     onLogs: (logs: LogEntry[]) => void
     onFairnessLogs?: (logs: LogEntry[]) => void
     onNotFound: () => void
@@ -1097,11 +1116,44 @@ export function subscribeToRoom(
       )
     : () => {}
 
+  const unsubFiles = callbacks.onFiles
+    ? onSnapshot(
+        collection(db, "rooms", code, "files"),
+        (snap) => {
+          const list: RoomFile[] = snap.docs.map((d) => {
+            const data = d.data()
+            return {
+              id: String(data.id || d.id),
+              path: String(data.path || data.name || d.id),
+              name: String(data.name || ""),
+              content: typeof data.content === "string" ? data.content : "",
+              mimeType: String(data.mimeType || "text/plain"),
+              size: typeof data.size === "number" ? data.size : 0,
+              createdBy: String(data.createdBy || data.updatedBy || ""),
+              updatedBy: String(data.updatedBy || ""),
+              createdAt: timestampToIso(data.createdAt),
+              updatedAt: timestampToIso(data.updatedAt),
+            }
+          })
+          list.sort((a, b) => a.path.localeCompare(b.path))
+          callbacks.onFiles?.(list)
+        },
+        (error) => {
+          try {
+            handleFirestoreError(error, OperationType.LIST, `rooms/${code}/files`)
+          } catch (wrapped) {
+            callbacks.onError(wrapped as Error)
+          }
+        }
+      )
+    : () => {}
+
   return () => {
     unsubRoom()
     unsubMembers()
     unsubMessages()
     unsubTasks()
+    unsubFiles()
     unsubLogs()
     unsubFairnessLogs()
   }
@@ -1515,6 +1567,240 @@ export async function deleteTaskFirestore(
     await batch.commit()
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `rooms/${code}/tasks/${task.id}`)
+  }
+}
+
+export async function createRoomFileFirestore(
+  rawCode: string,
+  input: { path: string; content: string },
+  user: User,
+  existingFiles: readonly RoomFile[]
+): Promise<string> {
+  const code = normalizeRoomCode(rawCode)
+  const validated = validateRoomFileInput(input.path, input.content)
+  if (!validated.ok) {
+    throw new Error(validated.error)
+  }
+
+  const duplicate = existingFiles.find(
+    (f) => f.path.toLowerCase() === validated.path.toLowerCase()
+  )
+  if (duplicate) {
+    throw new Error(`A file already exists at "${validated.path}". Open it to edit instead.`)
+  }
+  if (existingFiles.length >= MAX_ROOM_FILES) {
+    throw new Error(`This room has reached the limit of ${MAX_ROOM_FILES} project files.`)
+  }
+
+  const fileId = buildFileIdForPath(validated.path)
+  const batch = writeBatch(db)
+  const fileRef = doc(db, "rooms", code, "files", fileId)
+  const logId = makeClientId("log")
+  const logRef = doc(db, "rooms", code, "logs", logId)
+
+  batch.set(fileRef, {
+    id: fileId,
+    path: validated.path,
+    name: validated.name,
+    content: validated.content,
+    mimeType: validated.mimeType,
+    size: validated.size,
+    createdBy: user.uid,
+    updatedBy: user.uid,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  })
+  batch.set(logRef, {
+    id: logId,
+    actorId: user.uid,
+    triggeredBy: user.uid,
+    actor: getUserDisplayName(user),
+    action: "added file",
+    task_id: "files",
+    note: validated.path.slice(0, 500),
+    createdAt: serverTimestamp(),
+  })
+
+  try {
+    await batch.commit()
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `rooms/${code}/files/${fileId}`)
+  }
+
+  return fileId
+}
+
+export async function updateRoomFileFirestore(
+  rawCode: string,
+  file: RoomFile,
+  updates: { path?: string; content: string },
+  user: User,
+  existingFiles: readonly RoomFile[]
+): Promise<void> {
+  const code = normalizeRoomCode(rawCode)
+  const targetPath = updates.path ?? file.path
+  const validated = validateRoomFileInput(targetPath, updates.content)
+  if (!validated.ok) {
+    throw new Error(validated.error)
+  }
+
+  const duplicate = existingFiles.find(
+    (f) => f.id !== file.id && f.path.toLowerCase() === validated.path.toLowerCase()
+  )
+  if (duplicate) {
+    throw new Error(`Another file already exists at "${validated.path}".`)
+  }
+
+  const batch = writeBatch(db)
+  const fileRef = doc(db, "rooms", code, "files", file.id)
+  const logId = makeClientId("log")
+  const logRef = doc(db, "rooms", code, "logs", logId)
+
+  batch.update(fileRef, {
+    path: validated.path,
+    name: validated.name,
+    content: validated.content,
+    mimeType: validated.mimeType,
+    size: validated.size,
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp(),
+  })
+  batch.set(logRef, {
+    id: logId,
+    actorId: user.uid,
+    triggeredBy: user.uid,
+    actor: getUserDisplayName(user),
+    action: "updated file",
+    task_id: "files",
+    note: validated.path.slice(0, 500),
+    createdAt: serverTimestamp(),
+  })
+
+  try {
+    await batch.commit()
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `rooms/${code}/files/${file.id}`)
+  }
+}
+
+export async function deleteRoomFileFirestore(
+  rawCode: string,
+  file: RoomFile,
+  user: User
+): Promise<void> {
+  const code = normalizeRoomCode(rawCode)
+  const batch = writeBatch(db)
+  const fileRef = doc(db, "rooms", code, "files", file.id)
+  const logId = makeClientId("log")
+  const logRef = doc(db, "rooms", code, "logs", logId)
+
+  batch.delete(fileRef)
+  batch.set(logRef, {
+    id: logId,
+    actorId: user.uid,
+    triggeredBy: user.uid,
+    actor: getUserDisplayName(user),
+    action: "deleted file",
+    task_id: "files",
+    note: file.path.slice(0, 500),
+    createdAt: serverTimestamp(),
+  })
+
+  try {
+    await batch.commit()
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `rooms/${code}/files/${file.id}`)
+  }
+}
+
+export async function importGitRepoFiles(
+  rawCode: string,
+  user: User,
+  payload: { repoUrl: string; branch?: string }
+): Promise<{
+  importedCount: number
+  skippedCount: number
+  totalFiles: number
+  branch: string
+  repo: string
+}> {
+  const code = normalizeRoomCode(rawCode)
+  const idToken = await user.getIdToken()
+  const res = await fetch("/api/cohort/git/import", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      roomCode: code,
+      repoUrl: payload.repoUrl.trim(),
+      branch: payload.branch?.trim() || "",
+    }),
+  })
+  const data = (await res.json().catch(() => ({}))) as {
+    importedCount?: number
+    skippedCount?: number
+    totalFiles?: number
+    branch?: string
+    repo?: string
+    error?: string
+  }
+  if (!res.ok) {
+    throw new Error(data.error || "Could not import files from Git repository.")
+  }
+  return {
+    importedCount: Number(data.importedCount || 0),
+    skippedCount: Number(data.skippedCount || 0),
+    totalFiles: Number(data.totalFiles || 0),
+    branch: String(data.branch || "main"),
+    repo: String(data.repo || ""),
+  }
+}
+
+export async function pushRoomFilesToGit(
+  rawCode: string,
+  user: User,
+  payload: { repoUrl: string; branch?: string; pat: string }
+): Promise<{
+  commitUrl: string
+  commitSha: string
+  filesCount: number
+  branch: string
+  repo: string
+}> {
+  const code = normalizeRoomCode(rawCode)
+  const idToken = await user.getIdToken()
+  const res = await fetch("/api/cohort/git/push", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      roomCode: code,
+      repoUrl: payload.repoUrl.trim(),
+      branch: payload.branch?.trim() || "",
+      pat: payload.pat.trim(),
+    }),
+  })
+  const data = (await res.json().catch(() => ({}))) as {
+    commitUrl?: string
+    commitSha?: string
+    filesCount?: number
+    branch?: string
+    repo?: string
+    error?: string
+  }
+  if (!res.ok || !data.commitUrl) {
+    throw new Error(data.error || "Could not push room files to Git.")
+  }
+  return {
+    commitUrl: data.commitUrl,
+    commitSha: String(data.commitSha || ""),
+    filesCount: Number(data.filesCount || 0),
+    branch: String(data.branch || "main"),
+    repo: String(data.repo || ""),
   }
 }
 

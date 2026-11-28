@@ -165,6 +165,21 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidRoomFile(data, fileId) {
+      return data.keys().hasAll(['id', 'path', 'name', 'content', 'mimeType', 'size', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'path', 'name', 'content', 'mimeType', 'size', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt'])
+        && isValidId(data.id) && data.id == fileId
+        && data.path is string && data.path.size() >= 1 && data.path.size() <= 240
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && data.content is string && data.content.size() <= 204800
+        && data.mimeType is string && data.mimeType.size() >= 1 && data.mimeType.size() <= 100
+        && data.size is int && data.size >= 0 && data.size <= 204800
+        && isValidId(data.createdBy)
+        && isValidId(data.updatedBy) && data.updatedBy == request.auth.uid
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     match /rooms/{roomCode} {
       allow get: if isSignedIn() && isValidRoomCode(roomCode);
       allow list: if false;
@@ -368,6 +383,34 @@ service cloud.firestore {
           && isValidRoomCode(roomCode)
           && isValidTaskId(taskId)
           && isFullMember(roomCode);
+      }
+
+      match /files/{fileId} {
+        allow get: if isValidRoomCode(roomCode) && isValidId(fileId) && isFullMember(roomCode);
+        allow list: if isValidRoomCode(roomCode) && isFullMember(roomCode);
+        allow create: if isSignedIn()
+          && isValidRoomCode(roomCode)
+          && isValidId(fileId)
+          && isValidRoomFile(incoming(), fileId)
+          && incoming().createdBy == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && isFullMember(roomCode);
+        allow update: if isSignedIn()
+          && isValidRoomCode(roomCode)
+          && isValidId(fileId)
+          && isValidRoomFile(incoming(), fileId)
+          && isFullMember(roomCode)
+          && incoming().id == existing().id
+          && incoming().createdBy == existing().createdBy
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['path', 'name', 'content', 'mimeType', 'size', 'updatedBy', 'updatedAt']);
+        allow delete: if isSignedIn()
+          && isValidRoomCode(roomCode)
+          && isValidId(fileId)
+          && isFullMember(roomCode)
+          && (isRoomOwner(roomCode) || existing().createdBy == request.auth.uid);
       }
 
       match /logs/{logId} {

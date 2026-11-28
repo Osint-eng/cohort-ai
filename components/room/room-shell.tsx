@@ -11,6 +11,7 @@ import {
   ChevronDown,
   Clipboard,
   Command,
+  FileCode2,
   Hash,
   LayoutGrid,
   LogOut,
@@ -298,7 +299,7 @@ export default function RoomShell({
       )}
 
       <nav className="mobile-tabs" aria-label="Workspace sections">
-        {["Chat", "Board", "Log"].map((tab) => (
+        {["Chat", "Board", "Files", "Log"].map((tab) => (
           <button
             key={tab}
             onClick={() => onSetActiveTab(tab)}
@@ -308,6 +309,8 @@ export default function RoomShell({
               <MessageCircle size={15} />
             ) : tab === "Board" ? (
               <LayoutGrid size={15} />
+            ) : tab === "Files" ? (
+              <FileCode2 size={15} />
             ) : (
               <ArrowUpRight size={15} />
             )}

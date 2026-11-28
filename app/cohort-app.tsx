@@ -54,6 +54,7 @@ import {
   type Message,
   type MessageCursor,
   type RecentRoomEntry,
+  type RoomFile,
   type RoomMeta,
   type Task,
   type TaskStatus,
@@ -62,6 +63,7 @@ import { PROACTIVE_THRESHOLDS } from "@/lib/proactive-cohort"
 import ActivityMembersPanel from "@/components/room/activity-members-panel"
 import BoardPanel from "@/components/room/board-panel"
 import ChatPanel from "@/components/room/chat-panel"
+import FilesPanel from "@/components/room/files-panel"
 import JoinRoomScreen from "@/components/room/join-room-screen"
 import RoomShell from "@/components/room/room-shell"
 import {
@@ -95,6 +97,7 @@ export default function CohortApp({
   const [members, setMembers] = useState<Member[]>([])
   const [messages, setMessages] = useState<Message[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
+  const [files, setFiles] = useState<RoomFile[]>([])
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [fairnessLogs, setFairnessLogs] = useState<LogEntry[]>([])
   const [hasMoreMessages, setHasMoreMessages] = useState(false)
@@ -116,6 +119,7 @@ export default function CohortApp({
   const [message, setMessage] = useState("")
   const [cohortThinking, setCohortThinking] = useState(false)
   const [activeTab, setActiveTab] = useState("Chat")
+  const [centerPanel, setCenterPanel] = useState<"board" | "files">("board")
   const [view, setView] = useState<"board" | "table" | "fairness">("board")
   const [extractOpen, setExtractOpen] = useState(false)
   const [extracting, setExtracting] = useState(false)
@@ -256,8 +260,10 @@ export default function CohortApp({
     hasLoadedOlderRef.current = false
     skipAutoScrollRef.current = false
     setMessages([])
+    setFiles([])
     setLogs([])
     setFairnessLogs([])
+    setCenterPanel("board")
     setHasMoreMessages(false)
     setRoomLoading(true)
     setRoomNotFound(false)
@@ -400,6 +406,10 @@ export default function CohortApp({
       onTasks: (nextTasks) => {
         if (!active) return
         setTasks(nextTasks)
+      },
+      onFiles: (nextFiles) => {
+        if (!active) return
+        setFiles(nextFiles)
       },
       onLogs: (nextLogs) => {
         if (!active) return
@@ -961,6 +971,15 @@ export default function CohortApp({
     nowMs - remoteThinkingMs < 30_000
   const agentThinkingNow = cohortThinking || remoteAgentThinking
 
+  const handleSetActiveTab = (tab: string) => {
+    setActiveTab(tab)
+    if (tab === "Files") {
+      setCenterPanel("files")
+    } else if (tab === "Board") {
+      setCenterPanel("board")
+    }
+  }
+
   return (
     <RoomShell
       activeRoom={activeRoom}
@@ -980,7 +999,7 @@ export default function CohortApp({
       toast={toast}
       toastTone={toastTone}
       onSetRoomMenuOpen={setRoomMenuOpen}
-      onSetActiveTab={setActiveTab}
+      onSetActiveTab={handleSetActiveTab}
       onCopyCode={() => void copyCode()}
       onCopyInviteLink={() => void copyInviteLink()}
       onToggleTheme={toggleTheme}
@@ -1011,24 +1030,39 @@ export default function CohortApp({
         onSubmitExtract={submitExtract}
       />
 
-      <BoardPanel
-        activeRoom={activeRoom}
-        user={user}
-        activeTab={activeTab}
-        view={view}
-        tasks={tasks}
-        approvedMembers={approvedMembers}
-        mergedFairnessLogs={mergedFairnessLogs}
-        nowMs={nowMs}
-        updatingTaskId={updatingTaskId}
-        onSetView={setView}
-        onRunCheckIn={runAiCheckIn}
-        onOpenExtractModal={openExtractModal}
-        onChangeTaskStatus={(task, status) => void changeTaskStatus(task, status)}
-        onChangeTaskOwner={(task, member) => void changeTaskOwner(task, member)}
-        onDeleteTask={(task) => void handleDeleteTask(task)}
-        onToast={showToast}
-      />
+      {centerPanel === "files" ? (
+        <FilesPanel
+          activeRoom={activeRoom}
+          user={user}
+          isOwner={isOwner}
+          activeTab={activeTab}
+          files={files}
+          members={members}
+          onSwitchToBoard={() => handleSetActiveTab("Board")}
+          onToast={showToast}
+        />
+      ) : (
+        <BoardPanel
+          activeRoom={activeRoom}
+          user={user}
+          activeTab={activeTab}
+          view={view}
+          tasks={tasks}
+          fileCount={files.length}
+          approvedMembers={approvedMembers}
+          mergedFairnessLogs={mergedFairnessLogs}
+          nowMs={nowMs}
+          updatingTaskId={updatingTaskId}
+          onSetView={setView}
+          onSwitchToFiles={() => handleSetActiveTab("Files")}
+          onRunCheckIn={runAiCheckIn}
+          onOpenExtractModal={openExtractModal}
+          onChangeTaskStatus={(task, status) => void changeTaskStatus(task, status)}
+          onChangeTaskOwner={(task, member) => void changeTaskOwner(task, member)}
+          onDeleteTask={(task) => void handleDeleteTask(task)}
+          onToast={showToast}
+        />
+      )}
 
       <ActivityMembersPanel
         activeRoom={activeRoom}

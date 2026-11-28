@@ -418,6 +418,72 @@
         }
       },
       "required": ["uid", "count", "until", "updatedAt"]
+    },
+    "RoomFile": {
+      "title": "RoomFile",
+      "description": "Text project file belonging to a room, uploaded manually or imported from a Git repository.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "File document ID."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "description": "Normalized relative file path within the project."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Base filename."
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 204800,
+          "description": "Plain UTF-8 text content (max 200KB)."
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "MIME type inferred from file extension."
+        },
+        "size": {
+          "type": "integer",
+          "description": "UTF-8 byte size of the file content."
+        },
+        "createdBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the member who created or imported the file."
+        },
+        "updatedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the member who last updated the file."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp."
+        }
+      },
+      "required": ["id", "path", "name", "content", "mimeType", "size", "createdBy", "updatedBy", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -444,6 +510,10 @@
     "/rooms/{roomCode}/tasks/{taskId}": {
       "schema": { "$ref": "#/entities/Task" },
       "description": "Kanban project board tasks for the room."
+    },
+    "/rooms/{roomCode}/files/{fileId}": {
+      "schema": { "$ref": "#/entities/RoomFile" },
+      "description": "Shared text project files for the room (max 30 files, 200KB each)."
     },
     "/rooms/{roomCode}/logs/{logId}": {
       "schema": { "$ref": "#/entities/LogEntry" },

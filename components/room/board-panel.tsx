@@ -9,6 +9,7 @@ import {
   ArrowUpRight,
   Bot,
   Check,
+  FileCode2,
   LayoutGrid,
   List,
   LoaderCircle,
@@ -87,11 +88,13 @@ export default function BoardPanel({
   activeTab,
   view,
   tasks,
+  fileCount = 0,
   approvedMembers,
   mergedFairnessLogs,
   nowMs,
   updatingTaskId,
   onSetView,
+  onSwitchToFiles,
   onRunCheckIn,
   onOpenExtractModal,
   onChangeTaskStatus,
@@ -104,11 +107,13 @@ export default function BoardPanel({
   activeTab: string
   view: "board" | "table" | "fairness"
   tasks: Task[]
+  fileCount?: number
   approvedMembers: Member[]
   mergedFairnessLogs: LogEntry[]
   nowMs: number
   updatingTaskId: string | null
   onSetView: (view: "board" | "table" | "fairness") => void
+  onSwitchToFiles?: () => void
   onRunCheckIn: () => void
   onOpenExtractModal: () => void
   onChangeTaskStatus: (task: Task, status: TaskStatus) => void
@@ -147,11 +152,24 @@ export default function BoardPanel({
         aria-label="Project board"
       >
         <div className="panel-header board-header">
-          <div>
-            <h2>
-              Board <span className="task-count">{tasks.length}</span>
-            </h2>
-          </div>
+          {onSwitchToFiles ? (
+            <div className="center-panel-tabs" role="tablist" aria-label="Center workspace">
+              <button type="button" role="tab" aria-selected={true} className="active">
+                <LayoutGrid size={13} />
+                Board <span className="task-count">{tasks.length}</span>
+              </button>
+              <button type="button" role="tab" aria-selected={false} onClick={onSwitchToFiles}>
+                <FileCode2 size={13} />
+                Files <span className="task-count">{fileCount}</span>
+              </button>
+            </div>
+          ) : (
+            <div>
+              <h2>
+                Board <span className="task-count">{tasks.length}</span>
+              </h2>
+            </div>
+          )}
           <button
             className="icon-button small-icon"
             aria-label="Run AI check-in"

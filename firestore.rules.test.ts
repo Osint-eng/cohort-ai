@@ -182,6 +182,46 @@ export async function runSecurityAudit() {
   await assertSucceeds(getDocs(collection(bobDb, 'rooms', roomCode, 'members')));
   await assertSucceeds(getDocs(collection(bobDb, 'rooms', roomCode, 'tasks')));
 
+  // 19. Project files: full members can create/list/update; only creator or room owner can delete
+  await assertSucceeds(setDoc(doc(aliceDb, 'rooms', roomCode, 'files', 'file_alice1'), {
+    id: 'file_alice1',
+    path: 'README.md',
+    name: 'README.md',
+    content: '# Project',
+    mimeType: 'text/markdown',
+    size: 9,
+    createdBy: 'alice_uid',
+    updatedBy: 'alice_uid',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }));
+  await assertSucceeds(getDocs(collection(bobDb, 'rooms', roomCode, 'files')));
+  await assertSucceeds(updateDoc(doc(bobDb, 'rooms', roomCode, 'files', 'file_alice1'), {
+    content: '# Updated by Bob',
+    size: 16,
+    updatedBy: 'bob_uid',
+    updatedAt: serverTimestamp(),
+  }));
+  // Non-owner Bob cannot delete Alice's file
+  await assertFails(deleteDoc(doc(bobDb, 'rooms', roomCode, 'files', 'file_alice1')));
+  // Bob can create and delete his own file; Alice (owner) can delete Alice's or Bob's file
+  await assertSucceeds(setDoc(doc(bobDb, 'rooms', roomCode, 'files', 'file_bob1'), {
+    id: 'file_bob1',
+    path: 'notes.txt',
+    name: 'notes.txt',
+    content: 'hello',
+    mimeType: 'text/plain',
+    size: 5,
+    createdBy: 'bob_uid',
+    updatedBy: 'bob_uid',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }));
+  await assertSucceeds(deleteDoc(doc(bobDb, 'rooms', roomCode, 'files', 'file_bob1')));
+  await assertSucceeds(deleteDoc(doc(aliceDb, 'rooms', roomCode, 'files', 'file_alice1')));
+  // Unauthenticated / unverified user cannot read/write files
+  await assertFails(getDocs(collection(unverifiedDb, 'rooms', roomCode, 'files')));
+
   await testEnv.cleanup();
 }
 
