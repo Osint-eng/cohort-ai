@@ -81,6 +81,40 @@ async function setAgentStatus(
   ).catch(() => {})
 }
 
+function mapTaskDoc(d: { docId: string; data: Record<string, unknown> }, fallbackUpdatedBy: string): TaskDoc {
+  return {
+    id: String(d.data.id || d.docId),
+    title: String(d.data.title || ""),
+    description:
+      typeof d.data.description === "string" && d.data.description ? d.data.description : undefined,
+    weight:
+      typeof d.data.weight === "number" &&
+      Number.isInteger(d.data.weight) &&
+      d.data.weight >= 1 &&
+      d.data.weight <= 3
+        ? (d.data.weight as 1 | 2 | 3)
+        : undefined,
+    suggested_owner: String(d.data.suggested_owner || "@Team"),
+    owner_uid: String(d.data.owner_uid || ""),
+    due_date: String(d.data.due_date || "TBD"),
+    status: (d.data.status as TaskDoc["status"]) || "todo",
+    updatedBy: String(d.data.updatedBy || fallbackUpdatedBy),
+    createdAt: typeof d.data.createdAt === "string" ? d.data.createdAt : undefined,
+    updatedAt: typeof d.data.updatedAt === "string" ? d.data.updatedAt : undefined,
+  }
+}
+
+function mapMemberDocs(
+  memberDocs: Array<{ docId: string; data: Record<string, unknown> }>
+): MemberDoc[] {
+  return memberDocs
+    .filter((d) => d.data.role !== "pending")
+    .map((d) => ({
+      uid: String(d.data.uid || d.docId),
+      displayName: String(d.data.displayName || "Teammate"),
+    }))
+}
+
 export async function POST(req: NextRequest) {
   try {
     const user = await verifyFirebaseIdToken(req.headers.get("authorization"))
@@ -102,12 +136,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid room code" }, { status: 400 })
     }
 
-    const roomData = await fsGetDocument(`rooms/${roomCode}`, user.idToken)
+    const [roomData, memberData] = await Promise.all([
+      fsGetDocument(`rooms/${roomCode}`, user.idToken),
+      fsGetDocument(`rooms/${roomCode}/members/${user.uid}`, user.idToken),
+    ])
     if (!roomData) {
       return NextResponse.json({ error: "Room not found" }, { status: 404 })
     }
-
-    const memberData = await fsGetDocument(`rooms/${roomCode}/members/${user.uid}`, user.idToken)
     if (!memberData) {
       return NextResponse.json({ error: "You are not a member of this room" }, { status: 403 })
     }
@@ -117,39 +152,6 @@ export async function POST(req: NextRequest) {
         { status: 403 }
       )
     }
-
-    const [taskDocs, memberDocs] = await Promise.all([
-      fsListCollection(`rooms/${roomCode}/tasks`, user.idToken),
-      fsListCollection(`rooms/${roomCode}/members`, user.idToken),
-    ])
-
-    const tasks: TaskDoc[] = taskDocs.map((d) => ({
-      id: String(d.data.id || d.docId),
-      title: String(d.data.title || ""),
-      description:
-        typeof d.data.description === "string" && d.data.description ? d.data.description : undefined,
-      weight:
-        typeof d.data.weight === "number" &&
-        Number.isInteger(d.data.weight) &&
-        d.data.weight >= 1 &&
-        d.data.weight <= 3
-          ? (d.data.weight as 1 | 2 | 3)
-          : undefined,
-      suggested_owner: String(d.data.suggested_owner || "@Team"),
-      owner_uid: String(d.data.owner_uid || ""),
-      due_date: String(d.data.due_date || "TBD"),
-      status: (d.data.status as TaskDoc["status"]) || "todo",
-      updatedBy: String(d.data.updatedBy || user.uid),
-      createdAt: typeof d.data.createdAt === "string" ? d.data.createdAt : undefined,
-      updatedAt: typeof d.data.updatedAt === "string" ? d.data.updatedAt : undefined,
-    }))
-
-    const members: MemberDoc[] = memberDocs
-      .filter((d) => d.data.role !== "pending")
-      .map((d) => ({
-        uid: String(d.data.uid || d.docId),
-        displayName: String(d.data.displayName || "Teammate"),
-      }))
 
     const messageText = typeof body.messageText === "string" ? body.messageText.trim() : ""
     const action = typeof body.action === "string" ? body.action : ""
@@ -188,6 +190,9 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true, promptForBrief: true })
       }
 
+      const taskDocs = await fsListCollection(`rooms/${roomCode}/tasks`, user.idToken)
+      const tasks = taskDocs.map((d) => mapTaskDoc(d, user.uid))
+
       const requestedMode = body.extractMode === "replace" ? "replace" : "merge"
       const replaceConfirmed = body.replaceConfirmed === true
       const hasExistingTasks = tasks.length > 0
@@ -216,6 +221,9 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         )
       }
+
+      const memberDocs = await fsListCollection(`rooms/${roomCode}/members`, user.idToken)
+      const members = mapMemberDocs(memberDocs)
 
       const remainingCapacity = isReplace
         ? 8
@@ -330,6 +338,13 @@ export async function POST(req: NextRequest) {
 
     // 2. Check-in command (@cohort check-in)
     if (/@cohort\s+check-?in\b/i.test(messageText)) {
+      const [taskDocs, memberDocs] = await Promise.all([
+        fsListCollection(`rooms/${roomCode}/tasks`, user.idToken),
+        fsListCollection(`rooms/${roomCode}/members`, user.idToken),
+      ])
+      const tasks = taskDocs.map((d) => mapTaskDoc(d, user.uid))
+      const members = mapMemberDocs(memberDocs)
+
       let checkInReply: string
       await setAgentStatus(roomCode, "thinking", user.idToken)
       try {
@@ -382,8 +397,10 @@ export async function POST(req: NextRequest) {
       const rawState = markMatch[2].toLowerCase()
       const reason = (markMatch[3] || "").trim().replace(/^because\s+/i, "").slice(0, 480)
 
-      const existingTask = tasks.find((t) => t.id.toLowerCase() === targetId)
-      if (!existingTask) {
+      const existingTaskData = await fsGetDocument(`rooms/${roomCode}/tasks/${targetId}`, user.idToken)
+      if (!existingTaskData) {
+        const taskDocs = await fsListCollection(`rooms/${roomCode}/tasks`, user.idToken)
+        const existingIds = taskDocs.map((d) => String(d.data.id || d.docId))
         const msgId = makeId("msg")
         await fsCommit(
           [
@@ -396,7 +413,7 @@ export async function POST(req: NextRequest) {
                 triggeredBy: user.uid,
                 senderName: "cohort",
                 role: "assistant",
-                text: `I couldn’t find task ${targetId} on the board. Current tasks: ${tasks.map((t) => t.id).join(", ") || "none yet"}.`,
+                text: `I couldn’t find task ${targetId} on the board. Current tasks: ${existingIds.join(", ") || "none yet"}.`,
               },
               serverTimestampFields: ["createdAt"],
             },
@@ -405,6 +422,8 @@ export async function POST(req: NextRequest) {
         )
         return NextResponse.json({ ok: true })
       }
+
+      const existingTask = mapTaskDoc({ docId: targetId, data: existingTaskData }, user.uid)
 
       let nextStatus: TaskDoc["status"] = "todo"
       let logAction = "updated"
@@ -477,6 +496,9 @@ export async function POST(req: NextRequest) {
 
     // 4. List tasks (@cohort list)
     if (/@cohort\s+list\b/i.test(messageText)) {
+      const taskDocs = await fsListCollection(`rooms/${roomCode}/tasks`, user.idToken)
+      const tasks = taskDocs.map((d) => mapTaskDoc(d, user.uid))
+
       const replyText =
         tasks.length === 0
           ? "There are no tasks on the board yet. Try @cohort extract <your brief> to create some!"
@@ -537,15 +559,21 @@ export async function POST(req: NextRequest) {
     let replyText: string
     await setAgentStatus(roomCode, "thinking", user.idToken)
     try {
-      const recentMessageDocs = await fsRunQuery(
-        {
-          parentPath: `rooms/${roomCode}`,
-          collectionId: "messages",
-          orderBy: [{ fieldPath: "createdAt", direction: "DESCENDING" }],
-          limit: 12,
-        },
-        user.idToken
-      )
+      const [taskDocs, memberDocs, recentMessageDocs] = await Promise.all([
+        fsListCollection(`rooms/${roomCode}/tasks`, user.idToken),
+        fsListCollection(`rooms/${roomCode}/members`, user.idToken),
+        fsRunQuery(
+          {
+            parentPath: `rooms/${roomCode}`,
+            collectionId: "messages",
+            orderBy: [{ fieldPath: "createdAt", direction: "DESCENDING" }],
+            limit: 12,
+          },
+          user.idToken
+        ),
+      ])
+      const tasks = taskDocs.map((d) => mapTaskDoc(d, user.uid))
+      const members = mapMemberDocs(memberDocs)
 
       const recentMessages = [...recentMessageDocs].reverse().map((d) => ({
         senderName: String(d.data.senderName || "Teammate"),

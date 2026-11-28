@@ -28,6 +28,7 @@ import {
   type SandboxFiles,
   type SandboxTemplateMode,
 } from "@/lib/task-sandbox"
+import "@/app/styles/sandbox.css"
 
 function renderBriefPreviewLines(markdown: string) {
   return markdown.split("\n").map((line, idx) => {

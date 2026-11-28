@@ -102,7 +102,7 @@ describe("POST /api/cohort/pulse", () => {
     expect(mocks.fsCommit).not.toHaveBeenCalled()
   })
 
-  it("writes lastPulseCheckAt with ifMatchUpdateTime on a healthy check and returns nudged:false on conflict", async () => {
+  it("writes lastPulseCheckAt with ifMatchUpdateTime on a healthy empty board without listing members or querying messages", async () => {
     mocks.fsGetDocumentWithMeta.mockResolvedValueOnce({
       data: {
         code: "ROOM1234",
@@ -114,8 +114,7 @@ describe("POST /api/cohort/pulse", () => {
       },
       updateTime: "2026-11-27T11:30:00.000Z",
     })
-    mocks.fsListCollection.mockResolvedValue([])
-    mocks.fsRunQuery.mockResolvedValueOnce([])
+    mocks.fsListCollection.mockResolvedValueOnce([])
     mocks.fsCommit.mockRejectedValueOnce(new FirestoreConflictError("conflict"))
 
     const req = new NextRequest("http://localhost:3000/api/cohort/pulse", {
@@ -132,8 +131,10 @@ describe("POST /api/cohort/pulse", () => {
 
     expect(res.status).toBe(200)
     expect(body).toEqual({ ok: true, nudged: false })
-    expect(mocks.fsListCollection).toHaveBeenCalledTimes(2)
-    expect(mocks.fsRunQuery).toHaveBeenCalledTimes(1)
+    expect(mocks.fsListCollection).toHaveBeenCalledTimes(1)
+    expect(mocks.fsListCollection).toHaveBeenCalledWith("rooms/ROOM1234/tasks", "tok_1")
+    expect(mocks.fsRunQuery).not.toHaveBeenCalled()
+    expect(mocks.enforceUserRateLimit).not.toHaveBeenCalled()
     expect(mocks.fsCommit).toHaveBeenCalledWith(
       [
         {
@@ -147,6 +148,62 @@ describe("POST /api/cohort/pulse", () => {
       ],
       "tok_1"
     )
+  })
+
+  it("queries latest message for healthy open tasks but skips listing members when no nudge fires", async () => {
+    mocks.fsGetDocumentWithMeta.mockResolvedValueOnce({
+      data: {
+        code: "ROOM1234",
+        title: "Capstone",
+        agentAggressiveness: "medium",
+        agentStatus: "watching",
+        lastPulseCheckAt: "2026-11-27T11:30:00.000Z",
+        createdAt: "2026-11-20T00:00:00.000Z",
+      },
+      updateTime: "2026-11-27T11:30:00.000Z",
+    })
+    mocks.fsListCollection.mockResolvedValueOnce([
+      {
+        docId: "t1",
+        data: {
+          id: "t1",
+          title: "Future task",
+          suggested_owner: "@Alice",
+          due_date: "2026-12-20",
+          status: "in_progress",
+        },
+      },
+    ])
+    mocks.fsRunQuery.mockResolvedValueOnce([
+      {
+        docId: "m1",
+        data: {
+          role: "user",
+          senderId: "user_1",
+          createdAt: "2026-11-27T11:50:00.000Z",
+        },
+      },
+    ])
+    mocks.fsCommit.mockResolvedValueOnce(undefined)
+
+    const req = new NextRequest("http://localhost:3000/api/cohort/pulse", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer tok_1",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ roomCode: "ROOM1234", tzOffsetMinutes: 0 }),
+    })
+
+    const res = await POST(req)
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body).toEqual({ ok: true, nudged: false })
+    expect(mocks.fsListCollection).toHaveBeenCalledTimes(1)
+    expect(mocks.fsListCollection).toHaveBeenCalledWith("rooms/ROOM1234/tasks", "tok_1")
+    expect(mocks.fsRunQuery).toHaveBeenCalledTimes(1)
+    expect(mocks.enforceUserRateLimit).not.toHaveBeenCalled()
   })
 
   it("skips snoozed overdue task, nudges second overdue task, and persists nudgeState in same commit", async () => {
@@ -198,7 +255,6 @@ describe("POST /api/cohort/pulse", () => {
         },
       ])
       .mockResolvedValueOnce([{ docId: "user_1", data: { uid: "user_1", displayName: "Alice", role: "owner" } }])
-    mocks.fsRunQuery.mockResolvedValueOnce([])
     mocks.enforceUserRateLimit.mockResolvedValueOnce(undefined)
     mocks.generateProactiveNudgeWithGemini.mockResolvedValueOnce("Heads up on t2!")
     mocks.fsCommit.mockResolvedValueOnce(undefined)
@@ -217,6 +273,9 @@ describe("POST /api/cohort/pulse", () => {
 
     expect(res.status).toBe(200)
     expect(body).toEqual({ ok: true, nudged: true, reason: "deadline_soon" })
+    expect(mocks.fsRunQuery).not.toHaveBeenCalled()
+    expect(mocks.fsListCollection).toHaveBeenCalledTimes(2)
+    expect(mocks.enforceUserRateLimit).toHaveBeenCalledWith("user_1", "tok_1", "cohort")
     const commitWrites = mocks.fsCommit.mock.calls[0]?.[0] as Array<{
       data?: { nudgeState?: Record<string, { at: Date; n: number }> }
       updateMaskFields?: string[]

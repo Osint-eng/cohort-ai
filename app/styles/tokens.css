@@ -1,0 +1,128 @@
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) * .6);
+  --radius-md: calc(var(--radius) * .8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+:root {
+  color-scheme: light;
+  --background: #f7f6f3;
+  --foreground: #292723;
+  --card: #fff;
+  --card-foreground: #292723;
+  --popover: #fff;
+  --popover-foreground: #292723;
+  --primary: #f97316;
+  --primary-foreground: #fff;
+  --secondary: #f4f2ee;
+  --secondary-foreground: #48443e;
+  --muted: #f2f0ec;
+  --muted-foreground: #88847e;
+  --accent: #fff3e9;
+  --accent-foreground: #c6530b;
+  --destructive: #d94040;
+  --border: #ebe9e4;
+  --input: #ebe9e4;
+  --ring: #f97316;
+  --radius: .75rem;
+}
+
+.dark {
+  color-scheme: dark;
+  --background: #171715;
+  --foreground: #f3f1ec;
+  --card: #21211e;
+  --card-foreground: #f3f1ec;
+  --popover: #21211e;
+  --popover-foreground: #f3f1ec;
+  --primary: #fb8735;
+  --primary-foreground: #21140b;
+  --secondary: #2b2a27;
+  --secondary-foreground: #f3f1ec;
+  --muted: #292825;
+  --muted-foreground: #a09c94;
+  --accent: #39271c;
+  --accent-foreground: #ffad74;
+  --destructive: #ef6464;
+  --border: #34332f;
+  --input: #383731;
+  --ring: #fb8735;
+}
+
+@layer base {
+  * { @apply border-border outline-ring/50; }
+  body { @apply bg-background text-foreground; margin: 0; font-family: Arial, Helvetica, sans-serif; }
+  button, input, textarea { font: inherit; }
+  button { cursor: pointer; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--primary) 42%, transparent);
+    outline-offset: 2px;
+  }
+}
+
+.brand-mark { width: 34px; height: 34px; border-radius: 11px; background: #f97316; color: #fff; display: grid; place-items: center; box-shadow: 0 4px 10px #f9731633; }
+.eyebrow, .section-kicker { font-size: 9px; letter-spacing: 1.45px; font-weight: 750; color: #a29b90; margin: 0; }
+.eyebrow { display: flex; justify-content: center; align-items: center; gap: 7px; }
+.live-dot { width: 6px; height: 6px; border-radius: 50%; background: #74b48b; display: inline-block; box-shadow: 0 0 0 3px #74b48b20; }
+.primary-button { min-height: 42px; border: 0; border-radius: 9px; background: #f97316; color: white; padding: 0 16px; font-size: 12px; font-weight: 700; display: inline-flex; justify-content: center; align-items: center; gap: 10px; transition: background .15s, transform .15s; }
+.primary-button:hover { background: #e86810; transform: translateY(-1px); }
+.primary-button:disabled { opacity: .55; cursor: not-allowed; transform: none; }
+.secondary-btn { min-height: 38px; padding: 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--foreground); font-size: 11px; font-weight: 650; transition: border-color .15s, background .15s; }
+.secondary-btn:hover { border-color: #f39757; background: var(--muted); }
+.icon-button { border: 0; background: transparent; color: #8d887e; display: grid; place-items: center; border-radius: 7px; }
+.small-icon { width: 27px; height: 27px; }
+.small-icon:hover, .icon-button:hover { background: var(--muted); }
+.bot-avatar { background: #fff0e4; color: #df681a; }
+.dark .bot-avatar { background: #39271c; color: #ffad74; }
+.form-error { color: #c33b32; font-size: 11px; margin: -4px 0 0; }
+.modal-error { margin-top: 8px; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { to { opacity: .35; } }
+.avatar-img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; display: block; }
+.mini-avatars span, .user-avatar, .message-avatar, .member-avatar, .timeline-avatar, .input-avatar { overflow: hidden; }
+
+.modal-backdrop { position: fixed; inset: 0; background: #211b16a6; display: grid; place-items: center; padding: 20px; z-index: 5; backdrop-filter: blur(3px); }
+.extract-dialog { width: min(100%, 480px); background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 25px; box-shadow: 0 25px 80px #0003; position: relative; }
+.dialog-close { position: absolute; right: 16px; top: 16px; width: 29px; height: 29px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: #90897f; display: grid; place-items: center; }
+.dialog-icon { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 12px; background: #fff1e4; color: #e6752a; margin-bottom: 15px; }
+.dark .dialog-icon { background: #39271c; }
+.extract-dialog h2 { margin: 7px 0 7px; font-size: 21px; letter-spacing: -.7px; }
+.dialog-description { font-size: 11px; line-height: 1.6; color: #8d867c; max-width: 390px; margin: 0 0 19px; }
+.extract-dialog form>label { display: block; font-size: 10px; font-weight: 700; margin-bottom: 7px; }
+.extract-dialog textarea { width: 100%; min-height: 138px; resize: vertical; padding: 11px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--background); color: var(--foreground); font-size: 11px; line-height: 1.5; }
+.extract-dialog textarea::placeholder { color: #aaa49a; }
+.dialog-footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 12px; }
+.dialog-footer>span { color: #a39c91; font-size: 9px; display: flex; align-items: center; gap: 5px; }
+.dialog-footer>span svg { color: #e78a43; }
+.dialog-footer .primary-button { min-height: 38px; font-size: 10px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

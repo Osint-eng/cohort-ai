@@ -81,19 +81,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, nudged: false })
     }
 
-    const [taskDocs, memberDocs, messageDocs] = await Promise.all([
-      fsListCollection(`rooms/${roomCode}/tasks`, user.idToken),
-      fsListCollection(`rooms/${roomCode}/members`, user.idToken),
-      fsRunQuery(
-        {
-          parentPath: `rooms/${roomCode}`,
-          collectionId: "messages",
-          orderBy: [{ fieldPath: "createdAt", direction: "DESCENDING" }],
-          limit: 1,
-        },
-        user.idToken
-      ),
-    ])
+    const taskDocs = await fsListCollection(`rooms/${roomCode}/tasks`, user.idToken)
 
     const tasks = taskDocs.map((d) => ({
       id: String(d.data.id || d.docId),
@@ -104,31 +92,50 @@ export async function POST(req: NextRequest) {
       updatedAt: typeof d.data.updatedAt === "string" ? d.data.updatedAt : undefined,
     }))
 
-    const members = memberDocs
-      .filter((d) => d.data.role !== "pending")
-      .map((d) => ({
-        uid: String(d.data.uid || d.docId),
-        displayName: String(d.data.displayName || "Teammate"),
-      }))
-
-    const messages = messageDocs.map((d) => ({
-      role: String(d.data.role || "user"),
-      senderId: String(d.data.senderId || ""),
-      createdAt: typeof d.data.createdAt === "string" ? d.data.createdAt : undefined,
-    }))
-
     const nudgeState = parseNudgeState(roomData.nudgeState)
+    const hasOpenTasks = tasks.some((t) => t.status !== "done")
 
-    const evaluation = evaluateProactiveNudge({
-      aggressiveness,
-      lastProactiveAtIso,
-      roomCreatedAtIso: typeof roomData.createdAt === "string" ? roomData.createdAt : undefined,
-      nudgeState,
-      tasks,
-      messages,
-      nowMs,
-      tzOffsetMinutes,
-    })
+    // First evaluate task-only triggers (stale_blocked, deadline_soon) without reading messages.
+    // Only fetch the latest message for idle detection when open tasks exist and no task trigger fired.
+    let evaluation = hasOpenTasks
+      ? evaluateProactiveNudge({
+          aggressiveness,
+          lastProactiveAtIso,
+          roomCreatedAtIso: typeof roomData.createdAt === "string" ? roomData.createdAt : undefined,
+          nudgeState,
+          tasks,
+          messages: [],
+          nowMs,
+          tzOffsetMinutes,
+        })
+      : { shouldNudge: false as const }
+
+    if (hasOpenTasks && evaluation.reason !== "stale_blocked" && evaluation.reason !== "deadline_soon") {
+      const messageDocs = await fsRunQuery(
+        {
+          parentPath: `rooms/${roomCode}`,
+          collectionId: "messages",
+          orderBy: [{ fieldPath: "createdAt", direction: "DESCENDING" }],
+          limit: 1,
+        },
+        user.idToken
+      )
+      const messages = messageDocs.map((d) => ({
+        role: String(d.data.role || "user"),
+        senderId: String(d.data.senderId || ""),
+        createdAt: typeof d.data.createdAt === "string" ? d.data.createdAt : undefined,
+      }))
+      evaluation = evaluateProactiveNudge({
+        aggressiveness,
+        lastProactiveAtIso,
+        roomCreatedAtIso: typeof roomData.createdAt === "string" ? roomData.createdAt : undefined,
+        nudgeState,
+        tasks,
+        messages,
+        nowMs,
+        tzOffsetMinutes,
+      })
+    }
 
     const currentAgentStatus = roomData.agentStatus === "thinking" ? "thinking" : "watching"
 
@@ -169,8 +176,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, nudged: false })
     }
 
-    // Only enforce LLM rate limit when a proactive check actually requires Gemini generation
+    // Only enforce LLM rate limit and read members when a proactive check actually requires Gemini generation
     await enforceUserRateLimit(user.uid, user.idToken, "cohort")
+    const memberDocs = await fsListCollection(`rooms/${roomCode}/members`, user.idToken)
+    const members = memberDocs
+      .filter((d) => d.data.role !== "pending")
+      .map((d) => ({
+        uid: String(d.data.uid || d.docId),
+        displayName: String(d.data.displayName || "Teammate"),
+      }))
 
     const todayIso = getLocalTodayIso(nowMs, tzOffsetMinutes)
     const roomTitle = String(roomData.title || "Project room")

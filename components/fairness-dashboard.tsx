@@ -15,6 +15,7 @@ import {
   computeFairnessReport,
   INACTIVE_THRESHOLD_HOURS,
 } from "@/lib/fairness"
+import "@/app/styles/fairness.css"
 
 function formatRelativeAge(ts: string | null): string {
   if (!ts) return "No actions yet"

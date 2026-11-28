@@ -1,0 +1,125 @@
+.activity-panel { display:flex;flex-direction:column; }
+.activity-live { color:#3b9b5d;background:#edf8ef;border-radius:4px;padding:3px 5px;font-size:7px;letter-spacing:.6px; }
+.activity-feed { padding:16px 16px 15px;display:flex;flex-direction:column;gap:18px; }
+.timeline-item { display:flex;gap:9px;align-items:flex-start; }
+.timeline-avatar { width:25px;height:25px;border-radius:8px;display:grid;place-items:center;flex:none;font-size:8px;font-weight:750; }
+.timeline-copy { min-width:0;flex:1; }
+.timeline-copy>p:first-child { margin:1px 0 4px;font-size:10px;color:#837d73;line-height:1.45; }
+.timeline-copy strong { color:var(--foreground);font-weight:700; }
+.timeline-copy .task-id { color:#db772f;margin-left:2px; }
+.timeline-note { color:#9a9389;font-size:9px;line-height:1.45;margin:0 0 4px; }
+.timeline-copy time { color:#b0aaa0;font-size:8px; }
+.no-activity { font-size:10px;color:#999287; }
+.members-section { margin-top:7px;border-top:1px solid var(--border);padding:15px 16px 13px; }
+.members-heading { display:flex;justify-content:space-between;align-items:center;margin-bottom:11px; }
+.members-heading h3 { margin:5px 0 0;font-size:13px;font-weight:700; }
+.members-heading h3 span { font-size:9px;color:#aaa49a;margin-left:4px; }
+.members-heading>button { width:25px;height:25px;border-radius:7px;border:1px solid var(--border);background:var(--card);color:#8c857a;display:grid;place-items:center; }
+.member-list { display:flex;flex-direction:column;gap:10px; }
+.member-row { display:flex;align-items:center;gap:8px;flex-wrap:wrap; }
+.member-avatar { width:25px;height:25px;border-radius:8px;display:grid;place-items:center;font-size:8px;font-weight:750; }
+.member-name { flex:1;font-size:10px;font-weight:600; }
+.member-name small { color:#aba49a;font-size:8px;margin-left:5px;font-weight:500; }
+.member-status { color:#aaa49a;font-size:8px; }
+.member-status.online { color:#61a879; }
+.member-status.online::before { content:"";width:5px;height:5px;display:inline-block;border-radius:50%;background:#70b785;margin-right:5px; }
+.invite-link { width:100%;border:0;border-top:1px solid var(--border);background:transparent;margin-top:13px;padding:12px 0 0;display:flex;align-items:center;gap:7px;color:#b46630;font-size:9px;font-weight:650;text-align:left; }
+.invite-link svg:last-child { margin-left:auto; }
+.agent-card { margin:auto 13px 13px;padding:11px 10px;border-radius:9px;background:#fff6eb;border:1px solid #f8e8d6;display:flex;flex-direction:column;align-items:stretch;gap:10px;position:relative;overflow:hidden; }
+.dark .agent-card { background:#30271f;border-color:#463626; }
+.agent-icon { width:27px;height:27px;border-radius:8px;background:#ffead6;color:#dd6f25;display:grid;place-items:center; }
+.dark .agent-icon { background:#46301e;color:#ffad74; }
+.agent-card strong { font-size:9px; }
+.agent-card p { color:#9f907d;font-size:8px;margin:3px 0 0; }
+.agent-spark { color:#e9aa68;font-size:17px;margin-left:auto;align-self:flex-start; }
+
+.pending-count-pill { display:inline-block;margin-left:6px;padding:2px 6px;border-radius:10px;background:#fff1de;color:#c26a12;font-size:8px;font-weight:750;vertical-align:middle; }
+.dark .pending-count-pill { background:#3a2b17;color:#fbbf24; }
+.member-row.is-pending { padding:6px 8px;border:1px solid #f4d8be;border-radius:8px;background:#fffaf4; }
+.dark .member-row.is-pending { border-color:#533b25;background:#2a221b; }
+.owner-tag { background:var(--accent);color:var(--accent-foreground);padding:1px 5px;border-radius:4px;font-size:7px !important;font-weight:700 !important;text-transform:uppercase;letter-spacing:.4px; }
+.pending-member-controls { display:flex;align-items:center;gap:6px;margin-left:auto; }
+.member-pending-badge { padding:2px 6px;border-radius:5px;background:#fef3c7;color:#b45309;font-size:8px;font-weight:750; }
+.dark .member-pending-badge { background:#3f2e16;color:#fcd34d; }
+.owner-approval-actions { display:flex;align-items:center;gap:4px; }
+.approve-btn,.reject-btn { display:inline-flex;align-items:center;gap:3px;min-height:22px;padding:2px 6px;border-radius:5px;border:1px solid var(--border);font-size:8px;font-weight:700;transition:background .15s,border-color .15s; }
+.approve-btn { background:#eaf5ec;border-color:#b6dec2;color:#2f7a44; }
+.approve-btn:hover:not(:disabled) { background:#d7eedd;border-color:#78be8d; }
+.reject-btn { background:#fff1ef;border-color:#f2c2be;color:#b83c32; }
+.reject-btn:hover:not(:disabled) { background:#fde1de;border-color:#e4938d; }
+.approve-btn:disabled,.reject-btn:disabled { opacity:.55;cursor:not-allowed; }
+.dark .approve-btn { background:#213527;border-color:#355940;color:#9bd0a7; }
+.dark .reject-btn { background:#3a2322;border-color:#643634;color:#f3a39e; }
+
+.owner-invites-section { margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px; }
+.owner-invites-header { display:flex;align-items:center; }
+.create-temp-invite-btn { width:100%;display:flex;align-items:center;gap:7px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--background);color:var(--foreground);font-size:10px;font-weight:650;transition:border-color .15s,background .15s; }
+.create-temp-invite-btn:hover { border-color:#f39757;background:var(--accent);color:var(--accent-foreground); }
+.create-temp-invite-btn svg:last-child { margin-left:auto;transition:transform .15s; }
+.create-temp-invite-btn svg.rotated { transform:rotate(180deg); }
+.temp-invite-form { padding:10px;border:1px solid var(--border);border-radius:9px;background:var(--background);display:flex;flex-direction:column;gap:9px; }
+.temp-invite-field { display:flex;flex-direction:column;gap:5px; }
+.temp-invite-label { font-size:9px;font-weight:700;color:var(--muted-foreground); }
+.expiry-pills { display:grid;grid-template-columns:repeat(3,1fr);gap:5px; }
+.expiry-pills button { min-height:26px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--muted-foreground);font-size:9px;font-weight:650; }
+.expiry-pills button.active { border-color:#f39757;background:var(--accent);color:var(--accent-foreground); }
+.temp-invite-row { display:flex;align-items:flex-end;gap:7px; }
+.temp-invite-uses-label { display:flex;flex-direction:column;gap:4px;flex:1;min-width:0; }
+.temp-invite-uses-label span { font-size:9px;font-weight:700;color:var(--muted-foreground); }
+.temp-invite-uses-label input { height:28px;padding:0 8px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--foreground);font-size:10px;width:100%; }
+.generate-invite-submit { height:28px;padding:0 10px;border:0;border-radius:6px;background:#f97316;color:#fff;font-size:9px;font-weight:700;display:inline-flex;align-items:center;gap:5px;white-space:nowrap; }
+.generate-invite-submit:hover:not(:disabled) { background:#e86810; }
+.generate-invite-submit:disabled { opacity:.6; }
+.latest-invite-box { display:flex;align-items:center;gap:5px;padding:4px 5px 4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--card); }
+.latest-invite-box input { flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--muted-foreground);font:500 9px ui-monospace,SFMono-Regular,monospace; }
+.latest-invite-box button { width:22px;height:22px;border:1px solid var(--border);border-radius:5px;background:var(--background);color:var(--foreground);display:grid;place-items:center; }
+.invite-history-list { display:flex;flex-direction:column;gap:5px; }
+.invite-history-title { font-size:8px;font-weight:750;letter-spacing:.7px;text-transform:uppercase;color:var(--muted-foreground); }
+.invite-item-row { display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--card); }
+.invite-item-row.is-inactive { opacity:.65; }
+.invite-item-meta { display:flex;align-items:center;gap:6px;min-width:0; }
+.invite-status-pill { padding:2px 5px;border-radius:4px;background:var(--muted);color:var(--muted-foreground);font-size:8px;font-weight:700; }
+.invite-status-pill.is-active { background:#eaf5ec;color:#3d8450; }
+.dark .invite-status-pill.is-active { background:#24342a;color:#9bd0a7; }
+.invite-usage { font-size:9px;color:var(--muted-foreground); }
+.invite-item-actions { display:flex;align-items:center;gap:4px; }
+.invite-item-actions button { width:22px;height:22px;border:1px solid var(--border);border-radius:5px;background:var(--background);color:var(--muted-foreground);display:grid;place-items:center; }
+.invite-item-actions button:hover { color:var(--foreground);border-color:#f39757; }
+.invite-item-actions button.revoke-btn:hover { color:#c33b32;border-color:#ea9f9a; }
+
+.member-row.is-agent { padding:6px 8px;border:1px solid #f5dfc7;border-radius:8px;background:#fffaf4; }
+.dark .member-row.is-agent { border-color:#4b3524;background:#2a221b; }
+.agent-tag { background:#ffead7;color:#c95c14;padding:1px 5px;border-radius:4px;font-size:7px !important;font-weight:750 !important;letter-spacing:.4px; }
+.dark .agent-tag { background:#46301e;color:#ffad74; }
+.member-status.watching { color:#5ba373; }
+.member-status.watching::before { content:"";width:5px;height:5px;display:inline-block;border-radius:50%;background:#65b780;margin-right:5px; }
+.member-status.thinking { color:#d97706;font-weight:650; }
+.member-status.thinking::before { content:"";width:5px;height:5px;display:inline-block;border-radius:50%;background:#f59e0b;margin-right:5px;animation:pulse .65s ease-in-out infinite alternate; }
+.agent-card-top { display:flex;align-items:center;gap:9px; }
+.agent-card-state { font-size:8px;font-weight:700;color:#5ba373; }
+.agent-card-state.thinking { color:#d97706; }
+.agent-proactivity { display:flex;flex-direction:column;gap:6px;padding-top:8px;border-top:1px solid #f4dec8; }
+.dark .agent-proactivity { border-color:#463626; }
+.agent-proactivity-head { display:flex;flex-direction:column;gap:2px; }
+.agent-proactivity-head span { font-size:8px;font-weight:750;letter-spacing:.7px;text-transform:uppercase;color:#b87641; }
+.agent-proactivity-head small { font-size:8px;color:#9f907d;line-height:1.35; }
+.agent-proactivity-pills { display:grid;grid-template-columns:repeat(3,1fr);gap:4px; }
+.agent-proactivity-pills button { min-height:24px;border:1px solid #f1d8be;border-radius:6px;background:var(--card);color:var(--muted-foreground);font-size:9px;font-weight:650;transition:border-color .15s,background .15s,color .15s; }
+.agent-proactivity-pills button.active { border-color:#f97316;background:#f97316;color:#fff; }
+.agent-proactivity-pills button:disabled { cursor:default;opacity:.85; }
+.dark .agent-proactivity-pills button { border-color:#4f3c2b; }
+
+@media (max-width:1100px) {
+  .activity-panel { grid-column:1 / -1;display:grid;grid-template-columns:1fr 1.3fr 1fr;align-items:start; }
+  .activity-panel .panel-header { border-bottom:0; }
+  .activity-feed { grid-column:1;grid-row:2; }
+  .members-section { grid-column:2;grid-row:1 / span 2;border-top:0;border-left:1px solid var(--border);margin-top:12px; }
+  .agent-card { grid-column:3;grid-row:1 / span 2;margin-top:12px; }
+}
+
+@media (max-width:850px) {
+  .activity-panel { display:flex;min-height:calc(100svh - 143px); }
+  .activity-feed { flex:1; }
+  .members-section { border-left:0;border-top:1px solid var(--border);margin:0; }
+  .agent-card { margin-top:8px; }
+}

@@ -165,6 +165,23 @@ export async function runSecurityAudit() {
     lastSeenAt: serverTimestamp(),
   }));
 
+  // 17. Pending member can GET room + GET own member doc, but LIST members/tasks fails (403)
+  await assertSucceeds(getDoc(doc(bobDb, 'rooms', roomCode)));
+  await assertSucceeds(getDoc(doc(bobDb, 'rooms', roomCode, 'members', 'bob_uid')));
+  await assertFails(getDocs(collection(bobDb, 'rooms', roomCode, 'members')));
+  await assertFails(getDocs(collection(bobDb, 'rooms', roomCode, 'tasks')));
+
+  // 18. Approved member and owner can LIST members and tasks
+  await assertSucceeds(updateDoc(doc(aliceDb, 'rooms', roomCode, 'members', 'bob_uid'), {
+    role: 'member',
+    status: 'active',
+    lastSeenAt: serverTimestamp(),
+  }));
+  await assertSucceeds(getDocs(collection(aliceDb, 'rooms', roomCode, 'members')));
+  await assertSucceeds(getDocs(collection(aliceDb, 'rooms', roomCode, 'tasks')));
+  await assertSucceeds(getDocs(collection(bobDb, 'rooms', roomCode, 'members')));
+  await assertSucceeds(getDocs(collection(bobDb, 'rooms', roomCode, 'tasks')));
+
   await testEnv.cleanup();
 }
 

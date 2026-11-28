@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { ArrowDown, ArrowRight, ArrowUpRight, Check, ClipboardCheck, Command, Menu, MessageCircle, Moon, Sparkles, Sun, Users, X } from "lucide-react"
+import "./styles/landing.css"
 
 const features = [
   { icon: MessageCircle, title: "Group chat", copy: "Talk with your team and tag @cohort anytime." },
